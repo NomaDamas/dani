@@ -4,7 +4,7 @@ version = "0.0.1"
 description = "Simple loop for managing Github Repository; Backend is Oh-My-Codex"
 authors = [{ name = "NomaDamas", email = "vkehfdl1@gmail.com" }]
 readme = "README.md"
-keywords = ['python']
+keywords = ["python"]
 requires-python = ">=3.10,<4.0"
 classifiers = [
     "Intended Audience :: Developers",
@@ -17,6 +17,14 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
+dependencies = [
+    "fastapi>=0.118.0",
+    "typer>=0.19.2",
+    "uvicorn>=0.37.0",
+]
+
+[project.scripts]
+dani = "dani.cli:app"
 
 [project.urls]
 Homepage = "https://vkehfdl1.github.io/dani/"
@@ -25,14 +33,13 @@ Documentation = "https://vkehfdl1.github.io/dani/"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.0.2",
     "pre-commit>=4.5.1",
     "tox-uv>=1.29.0",
     "deptry>=0.24.0",
     "ty>=0.0.14",
-
     "ruff>=0.14.14",
-
 ]
 
 [build-system]
@@ -56,46 +63,30 @@ fix = true
 
 [tool.ruff.lint]
 select = [
-    # flake8-2020
     "YTT",
-    # flake8-bandit
     "S",
-    # flake8-bugbear
     "B",
-    # flake8-builtins
     "A",
-    # flake8-comprehensions
     "C4",
-    # flake8-debugger
     "T10",
-    # flake8-simplify
     "SIM",
-    # isort
     "I",
-    # mccabe
     "C90",
-    # pycodestyle
     "E", "W",
-    # pyflakes
     "F",
-    # pygrep-hooks
     "PGH",
-    # pyupgrade
     "UP",
-    # ruff
     "RUF",
-    # tryceratops
     "TRY",
 ]
 ignore = [
-    # LineTooLong
     "E501",
-    # DoNotAssignLambda
     "E731",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
+"tests/*" = ["S101", "S105"]
+"dani/omx_runner.py" = ["S607"]
 
 [tool.ruff.format]
 preview = true
