@@ -50,6 +50,9 @@ class DaniService:
         for issue in issues:
             if "pull_request" in issue:
                 continue
+            latest_signature = self.github.latest_signature_comment(repo_full_name, issue["number"], kind="issue")
+            if latest_signature is not None and latest_signature[1].get("stage") == "issue_request":
+                continue
             event = NormalizedEvent(
                 kind="issue_opened",
                 repo_full_name=repo_full_name,

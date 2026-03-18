@@ -163,6 +163,29 @@ def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
     assert first_job.stage == "issue_request"
 
 
+def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.open_issues["acme/demo"] = [
+        {"number": 5, "title": "Already handled", "body": "Need sync"},
+        {"number": 6, "title": "Needs bootstrap", "body": "Need report"},
+    ]
+    github.add_issue_signature(
+        "acme/demo",
+        5,
+        build_signature(stage="issue_request", job="existing-job", issue=5),
+    )
+
+    count = service.bootstrap_repo("acme/demo")
+    service.wait_for_idle()
+
+    assert count == 1
+    assert len(omx_runner.launches) == 1
+    only_job = omx_runner.launches[0]["job"]
+    assert isinstance(only_job, JobRecord)
+    assert only_job.issue_number == 6
+    assert only_job.stage == "issue_request"
+
+
 def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
 
