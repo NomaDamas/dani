@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import cast
 
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, NormalizedEvent
+from dani.models import DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
 from dani.service import DaniService
 from dani.signatures import build_signature
@@ -143,6 +143,24 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
     service.handle_event(verdict_event)
 
     assert github.merged == [("acme/demo", 77)]
+
+
+def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.open_issues["acme/demo"] = [
+        {"number": 5, "title": "Bootstrap me", "body": "Need sync"},
+        {"number": 6, "title": "Skip PR", "body": "PR body", "pull_request": {"url": "x"}},
+    ]
+
+    count = service.bootstrap_repo("acme/demo")
+    service.wait_for_idle()
+
+    assert count == 1
+    assert len(omx_runner.launches) == 1
+    first_job = omx_runner.launches[0]["job"]
+    assert isinstance(first_job, JobRecord)
+    assert first_job.issue_number == 5
+    assert first_job.stage == "issue_request"
 
 
 def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:

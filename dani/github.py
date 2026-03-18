@@ -17,7 +17,7 @@ class GitHubCLI:
         return json.loads(payload)
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
-        return self.api_json(f"repos/{repo_full_name}/issues", "-f", "state=open")
+        return self.api_json("--method", "GET", f"repos/{repo_full_name}/issues", "-f", "state=open")
 
     def issue_comments(self, repo_full_name: str, issue_number: int) -> list[dict[str, Any]]:
         return self.api_json(f"repos/{repo_full_name}/issues/{issue_number}/comments")
