@@ -1,32 +1,62 @@
 from __future__ import annotations
 
-import json
-import subprocess
+import os
+from collections.abc import Callable
 from typing import Any
+
+from github import Auth, Github
 
 from dani.signatures import parse_signature
 
+TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
+
 
 class GitHubCLI:
-    def _run(self, args: list[str]) -> str:
-        completed = subprocess.run(args, check=True, capture_output=True, text=True)  # noqa: S603
-        return completed.stdout
+    def __init__(
+        self,
+        *,
+        token: str | None = None,
+        client_factory: Callable[[str], Any] | None = None,
+    ) -> None:
+        self._token = token
+        self._client_factory = client_factory or self._build_client
+        self._client: Any | None = None
 
-    def api_json(self, *args: str) -> Any:
-        payload = self._run(["gh", "api", *args])
-        return json.loads(payload)
+    def _build_client(self, token: str) -> Github:
+        return Github(auth=Auth.Token(token))
+
+    def _resolve_token(self) -> str:
+        if self._token:
+            return self._token
+        for env_var in TOKEN_ENV_VARS:
+            value = os.environ.get(env_var)
+            if value:
+                self._token = value
+                return value
+        msg = "GitHub token not configured. Set DANI_GITHUB_TOKEN (preferred), GITHUB_TOKEN, GH_TOKEN, or GITHUB_PAT."
+        raise RuntimeError(msg)
+
+    def _client_for_request(self) -> Any:
+        if self._client is None:
+            self._client = self._client_factory(self._resolve_token())
+        return self._client
+
+    def _repo(self, repo_full_name: str) -> Any:
+        return self._client_for_request().get_repo(repo_full_name)
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
-        return self.api_json("--method", "GET", f"repos/{repo_full_name}/issues", "-f", "state=open")
+        return [issue.raw_data for issue in self._repo(repo_full_name).get_issues(state="open")]
 
     def issue_comments(self, repo_full_name: str, issue_number: int) -> list[dict[str, Any]]:
-        return self.api_json(f"repos/{repo_full_name}/issues/{issue_number}/comments")
+        issue = self._repo(repo_full_name).get_issue(issue_number)
+        return [comment.raw_data for comment in issue.get_comments()]
 
     def pr_comments(self, repo_full_name: str, pr_number: int) -> list[dict[str, Any]]:
-        return self.api_json(f"repos/{repo_full_name}/issues/{pr_number}/comments")
+        pull_request = self._repo(repo_full_name).get_pull(pr_number)
+        return [comment.raw_data for comment in pull_request.get_issue_comments()]
 
     def list_pull_requests(self, repo_full_name: str) -> list[dict[str, Any]]:
-        return self.api_json(f"repos/{repo_full_name}/pulls", "-f", "state=open")
+        return [pull_request.raw_data for pull_request in self._repo(repo_full_name).get_pulls(state="open")]
 
     def find_pr_by_signature(self, repo_full_name: str, signature_fragment: str) -> dict[str, Any] | None:
         for pull_request in self.list_pull_requests(repo_full_name):
@@ -46,5 +76,32 @@ class GitHubCLI:
                 return comment, parsed
         return None
 
+    def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
+        issue = self._repo(repo_full_name).get_issue(issue_number)
+        return issue.create_comment(body).raw_data
+
+    def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
+        pull_request = self._repo(repo_full_name).get_pull(pr_number)
+        return pull_request.create_issue_comment(body).raw_data
+
+    def ensure_pull_request(
+        self,
+        repo_full_name: str,
+        *,
+        head: str,
+        base: str,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        repo = self._repo(repo_full_name)
+        owner, _repo_name = repo_full_name.split("/", 1)
+        existing_pull_requests = list(repo.get_pulls(state="open", head=f"{owner}:{head}", base=base))
+        if existing_pull_requests:
+            pull_request = existing_pull_requests[0]
+            pull_request.edit(title=title, body=body, base=base)
+            return pull_request.raw_data
+        return repo.create_pull(title=title, body=body, base=base, head=head).raw_data
+
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
-        self._run(["gh", "pr", "merge", str(pr_number), "--repo", repo_full_name, "--merge", "--delete-branch"])
+        pull_request = self._repo(repo_full_name).get_pull(pr_number)
+        pull_request.merge(merge_method="merge", delete_branch=True)

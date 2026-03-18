@@ -13,7 +13,7 @@ def create_app(service: DaniService) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/webhooks/github")
+    @app.post("/webhook")
     async def github_webhook(request: Request) -> dict[str, object]:
         body = await request.body()
         signature = request.headers.get("x-hub-signature-256")

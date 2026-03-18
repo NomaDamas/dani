@@ -15,7 +15,7 @@ Task: review GitHub issue #$issue_number titled "$issue_title".
 Issue body:
 $issue_body
 
-Write a GitHub issue comment via gh CLI that includes:
+Write a GitHub issue comment that includes:
 1. Why this issue is needed
 2. Why this issue may not be needed
 3. A concise implementation plan
@@ -23,6 +23,9 @@ Write a GitHub issue comment via gh CLI that includes:
 
 Use this exact signature somewhere in the comment:
 $signature
+
+Post it with the bundled PyGithub helper (write the comment to a file first, then send it):
+$github_helper issue-comment --repo $repo --issue $issue_number --body-file <comment-file.md>
 
 After posting the comment, exit.
         """.strip()
@@ -46,11 +49,12 @@ Requirements:
 - Make all tests pass
 - Actually run the code and verify behavior
 - Create/update branch named like feature/#$issue_number
-- Open a PR targeting $dev_branch
+- Open or update a PR targeting $dev_branch with the bundled PyGithub helper:
+  $github_helper ensure-pr --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
 - Put this signature in the PR body:
 $signature
 
-After creating the PR with gh CLI, exit.
+After creating or updating the PR, exit.
         """.strip()
     ),
     "review_round": Template(
@@ -68,7 +72,10 @@ Use the code locally, review the changes, and leave exactly one GitHub PR commen
 Include this exact signature in the comment:
 $signature
 
-After posting the PR comment with gh CLI, exit.
+Post it with the bundled PyGithub helper:
+$github_helper pr-comment --repo $repo --pr $pr_number --body-file <review-comment.md>
+
+After posting the PR comment, exit.
         """.strip()
     ),
     "final_verdict": Template(
@@ -87,7 +94,10 @@ $approve_signature
 If you reject, include this exact signature in the comment:
 $reject_signature
 
-After posting the PR comment with gh CLI, exit.
+Post it with the bundled PyGithub helper:
+$github_helper pr-comment --repo $repo --pr $pr_number --body-file <final-verdict.md>
+
+After posting the PR comment, exit.
         """.strip()
     ),
 }
@@ -95,6 +105,7 @@ After posting the PR comment with gh CLI, exit.
 
 def render_prompt(template_name: str, context: dict[str, Any]) -> str:
     template = TEMPLATES[template_name]
+    context = {"github_helper": "", **context}
     if template_name != "final_verdict" and "signature" not in context:
         context = {
             **context,

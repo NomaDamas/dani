@@ -40,7 +40,7 @@ def test_github_webhook_endpoint_accepts_valid_signature(tmp_path: Path) -> None
     body = json.dumps(payload).encode("utf-8")
 
     response = client.post(
-        "/webhooks/github",
+        "/webhook",
         content=body,
         headers={
             "x-github-event": "issues",

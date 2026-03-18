@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,12 @@ ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
 
 
 class DaniService:
+    @staticmethod
+    def _github_helper_command() -> str:
+        python_executable = shlex.quote(sys.executable)
+        helper_script = shlex.quote(str(Path(__file__).with_name("github_helper.py")))
+        return f"{python_executable} {helper_script}"
+
     def __init__(
         self,
         config: DaniConfig,
@@ -207,8 +215,6 @@ class DaniService:
         pr_title = job.metadata.get("title", f"PR #{pr_number}")
         issue_body = job.metadata.get("body", "")
         pr_body = job.metadata.get("body", "")
-        issue_url = f"https://github.com/{repo.full_name}/issues/{issue_number}" if issue_number else ""
-
         if job.stage == "issue_request":
             return render_prompt(
                 "issue_request",
@@ -218,8 +224,8 @@ class DaniService:
                     "issue_number": issue_number,
                     "issue_title": issue_title,
                     "issue_body": issue_body,
-                    "issue_url": issue_url,
                     "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
+                    "github_helper": self._github_helper_command(),
                 },
             )
 
@@ -235,6 +241,7 @@ class DaniService:
                     "discussion": f"Issue #{issue_number} implementation request",
                     "dev_branch": repo.dev_branch,
                     "signature": build_signature(stage="implementation", job=job.id, issue=issue_number),
+                    "github_helper": self._github_helper_command(),
                 },
             )
 
@@ -251,6 +258,7 @@ class DaniService:
                     "signature": build_signature(
                         stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1
                     ),
+                    "github_helper": self._github_helper_command(),
                 },
             )
 
@@ -266,6 +274,7 @@ class DaniService:
                     stage="final_verdict", job=job.id, pr=pr_number, verdict="APPROVE"
                 ),
                 "reject_signature": build_signature(stage="final_verdict", job=job.id, pr=pr_number, verdict="REJECT"),
+                "github_helper": self._github_helper_command(),
             },
         )
 

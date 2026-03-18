@@ -66,10 +66,11 @@ def bootstrap(
     repo_full_name: str = FULL_NAME_ARGUMENT,
     data_dir: Path = DATA_DIR_OPTION,
 ) -> None:
-    """Queue open issues for a registered repository."""
+    """Bootstrap open issues for a registered repository and wait for completion."""
     service = build_service(data_dir=data_dir)
     count = service.bootstrap_repo(repo_full_name)
-    typer.echo(f"queued {count} issues")
+    service.wait_for_idle()
+    typer.echo(f"processed {count} issues")
 
 
 @app.command("show-state")

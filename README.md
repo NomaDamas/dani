@@ -17,13 +17,13 @@ Simple GitHub webhook -> OMX automation loop.
 
 ## Environment
 Required local tools:
-- `gh`
 - `git`
 - `omx`
 - `tmux`
 
-Required environment variable:
+Required environment variables:
 - `DANI_WEBHOOK_SECRET`
+- `DANI_GITHUB_TOKEN` (preferred) or `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT`
 
 ## CLI
 ```bash
@@ -40,3 +40,13 @@ State is stored under `.dani/` by default:
 - `sessions.json`
 - `events.jsonl`
 - `runs/` for generated OMX prompt/script artifacts
+
+
+## GitHub helper for agents
+Agents should use the bundled PyGithub helper instead of `gh` subprocess calls:
+
+```bash
+python /absolute/path/to/dani/github_helper.py issue-comment --repo owner/name --issue 123 --body-file comment.md
+python /absolute/path/to/dani/github_helper.py pr-comment --repo owner/name --pr 456 --body-file review.md
+python /absolute/path/to/dani/github_helper.py ensure-pr --repo owner/name --head feature/#123 --base dev --title "Feature/#123" --body-file pr-body.md
+```
