@@ -30,6 +30,28 @@ $github_helper issue-comment --repo $repo --issue $issue_number --body-file <com
 After posting the comment, exit.
         """.strip()
     ),
+    "issue_followup": Template(
+        """
+You are resuming the existing discussion for GitHub issue #$issue_number in $repo.
+Local path: $local_path
+Issue title: $issue_title
+
+Original issue body:
+$issue_body
+
+New user follow-up comment:
+$comment_body
+
+Continue the existing issue discussion instead of restarting the analysis from scratch.
+Write exactly one GitHub issue comment that addresses the new follow-up and includes this exact signature:
+$signature
+
+Post it with the bundled PyGithub helper (write the comment to a file first, then send it):
+$github_helper issue-comment --repo $repo --issue $issue_number --body-file <followup-comment.md>
+
+After posting the comment, exit.
+        """.strip()
+    ),
     "implementation": Template(
         """
 You are operating inside repository: $repo

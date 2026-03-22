@@ -65,10 +65,18 @@ class LaunchRecord(TypedDict):
     prompt: str
 
 
+class ResumeRecord(TypedDict):
+    repo_path: str
+    job: JobRecord
+    prompt: str
+    omx_session_id: str
+
+
 class FakeOmxRunner:
     def __init__(self, github: FakeGitHubCLI) -> None:
         self.github = github
         self.launches: list[LaunchRecord] = []
+        self.resumes: list[ResumeRecord] = []
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
@@ -117,6 +125,35 @@ class FakeOmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
+            omx_session_id=f"omx-{job.id}",
+        )
+
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        issue_number = job.issue_number or 0
+        self.github.add_issue_signature(
+            job.repo_full_name,
+            issue_number,
+            build_signature(stage="issue_followup", job=job.id, issue=issue_number),
+        )
+        self.resumes.append({
+            "repo_path": str(repo_path),
+            "job": job,
+            "prompt": prompt,
+            "omx_session_id": omx_session_id,
+        })
+        return SessionRecord(
+            repo_full_name=job.repo_full_name,
+            stage=job.stage,
+            tmux_session=f"tmux-{job.id}",
+            pane_id="%1",
+            prompt_path=str(repo_path / "prompt.txt"),
+            script_path=str(repo_path / "run.sh"),
+            worktree_path=str(repo_path),
+            job_id=job.id,
+            issue_number=job.issue_number,
+            pr_number=job.pr_number,
+            review_round=job.review_round,
+            omx_session_id=omx_session_id,
         )
 
     def wait(self, tmux_session: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
