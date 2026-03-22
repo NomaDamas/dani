@@ -20,6 +20,7 @@ class JsonStorage:
         self._ensure_json_file(self.config.registry_path, {"repos": []})
         self._ensure_json_file(self.config.jobs_path, {"jobs": []})
         self._ensure_json_file(self.config.sessions_path, {"sessions": []})
+        self._ensure_json_file(self.config.processed_events_path, {"keys": []})
         if not self.config.events_path.exists():
             self.config.events_path.write_text("", encoding="utf-8")
 
@@ -164,11 +165,26 @@ class JsonStorage:
         with self._lock, self.config.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
+    def record_processed_event(self, key: str) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.processed_events_path)
+            if key in payload["keys"]:
+                return False
+            payload["keys"].append(key)
+            self._write_json(self.config.processed_events_path, payload)
+            return True
+
+    def has_processed_event(self, key: str) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.processed_events_path)
+            return key in payload["keys"]
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "registry": self._read_json(self.config.registry_path),
                 "jobs": self._read_json(self.config.jobs_path),
                 "sessions": self._read_json(self.config.sessions_path),
+                "processed_events": self._read_json(self.config.processed_events_path),
                 "events_path": str(self.config.events_path),
             }

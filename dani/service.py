@@ -110,6 +110,9 @@ class DaniService:
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
         if stage == "review_round":
+            event_key = self._agent_event_key(signature)
+            if self.storage.has_processed_event(event_key):
+                return {"status": "ignored", "reason": "duplicate_agent_event"}
             review_round = int(signature["round"])
             pr_number = int(signature["pr"])
             if review_round < self.config.review_rounds:
@@ -123,6 +126,7 @@ class DaniService:
                     review_round=review_round + 1,
                     metadata={"title": event.title or "", "body": event.body or ""},
                 )
+                self.storage.record_processed_event(event_key)
                 return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
 
             repo = self.storage.get_repo(event.repo_full_name)
@@ -134,6 +138,7 @@ class DaniService:
                 pr_number=pr_number,
                 metadata={"title": event.title or "", "body": event.body or ""},
             )
+            self.storage.record_processed_event(event_key)
             return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
 
         if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
@@ -291,7 +296,15 @@ class DaniService:
                 raise RuntimeError("implementation-pr-missing")
             return
         if job.stage == "review_round":
-            if self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None:
+            signature = build_signature(
+                stage="review_round",
+                job=job.id,
+                pr=int(job.pr_number or 0),
+                round=job.review_round or 1,
+            )
+            if not self.github.find_comments_by_signature(
+                repo.full_name, int(job.pr_number or 0), kind="pr", signature_fragment=signature
+            ):
                 raise RuntimeError("review-comment-missing")
             return
         if (
@@ -394,3 +407,11 @@ class DaniService:
             pr_number=pr_number,
             require_omx_session_id=True,
         )
+
+    def _agent_event_key(self, signature: dict[str, str]) -> str:
+        fields = [("stage", signature.get("stage", ""))]
+        for key in ("pr", "round", "job", "verdict"):
+            value = signature.get(key)
+            if value:
+                fields.append((key, value))
+        return ";".join(f"{key}={value}" for key, value in fields)
