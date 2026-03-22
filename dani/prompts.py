@@ -27,8 +27,8 @@ Checklist:
 Use this exact signature somewhere in the comment:
 $signature
 
-Post it with the bundled PyGithub helper (write the comment to a file first, then send it):
-$github_helper issue-comment --repo $repo --issue $issue_number --body-file <comment-file.md>
+Post it with gh (write the comment to a file first, then send it):
+gh issue comment $issue_number --repo $repo --body-file <comment-file.md>
 
 After posting the comment, exit.
         """.strip()
@@ -49,8 +49,8 @@ Continue the existing issue discussion instead of restarting the analysis from s
 Write exactly one GitHub issue comment that addresses the new follow-up and includes this exact signature:
 $signature
 
-Post it with the bundled PyGithub helper (write the comment to a file first, then send it):
-$github_helper issue-comment --repo $repo --issue $issue_number --body-file <followup-comment.md>
+Post it with gh (write the comment to a file first, then send it):
+gh issue comment $issue_number --repo $repo --body-file <followup-comment.md>
 
 After posting the comment, exit.
         """.strip()
@@ -74,8 +74,10 @@ Requirements:
 - Make all tests pass
 - Actually run the code and verify behavior
 - Create/update branch named like feature/#$issue_number
-- Open or update a PR targeting $dev_branch with the bundled PyGithub helper:
-  $github_helper ensure-pr --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
+- Open or update a PR targeting $dev_branch with gh:
+  gh pr create --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
+  If the PR already exists, update it with:
+  gh pr edit --repo $repo --head feature/#$issue_number --title "Feature/#$issue_number" --body-file <pr-body.md>
 - Put this signature in the PR body:
 $signature
 
@@ -102,8 +104,8 @@ Checklist:
 - [ ] Backend: actual API call result when relevant
 - [ ] Include this exact signature: $signature
 
-Post it with the bundled PyGithub helper:
-$github_helper pr-comment --repo $repo --pr $pr_number --body-file <review-comment.md>
+Post it with gh:
+gh pr comment $pr_number --repo $repo --body-file <review-comment.md>
 
 After posting the PR comment, exit.
         """.strip()
@@ -130,8 +132,8 @@ Checklist:
 - [ ] If APPROVE, include: $approve_signature
 - [ ] If REJECT, include: $reject_signature
 
-Post it with the bundled PyGithub helper:
-$github_helper pr-comment --repo $repo --pr $pr_number --body-file <final-verdict.md>
+Post it with gh:
+gh pr comment $pr_number --repo $repo --body-file <final-verdict.md>
 
 After posting the PR comment, exit.
         """.strip()
@@ -141,7 +143,7 @@ After posting the PR comment, exit.
 
 def render_prompt(template_name: str, context: dict[str, Any]) -> str:
     template = TEMPLATES[template_name]
-    context = {"github_helper": "", **context}
+    context = dict(context)
     if template_name != "final_verdict" and "signature" not in context:
         context = {
             **context,

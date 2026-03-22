@@ -20,7 +20,7 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
-def test_issue_request_prompt_uses_pygithub_helper_instructions() -> None:
+def test_issue_request_prompt_uses_gh_instructions() -> None:
     prompt = render_prompt(
         "issue_request",
         {
@@ -30,13 +30,11 @@ def test_issue_request_prompt_uses_pygithub_helper_instructions() -> None:
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
             "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
-            "github_helper": "/usr/bin/python3 /tmp/dani/github_helper.py",
         },
     )
 
-    assert "PyGithub helper" in prompt
-    assert "/usr/bin/python3 /tmp/dani/github_helper.py" in prompt
-    assert "gh CLI" not in prompt
+    assert "gh issue comment 7 --repo acme/demo --body-file <comment-file.md>" in prompt
+    assert "PyGithub helper" not in prompt
 
 
 def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None:
@@ -71,7 +69,7 @@ def test_review_round_prompt_requires_real_result_evidence() -> None:
     )
 
     assert "real result" in prompt.lower()
-    assert "actual" in prompt.lower()
+    assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
 def test_final_verdict_prompt_contains_both_signatures() -> None:
@@ -110,3 +108,4 @@ def test_final_verdict_prompt_requires_real_result_evidence() -> None:
     assert "screenshot" in prompt.lower()
     assert "cli" in prompt.lower()
     assert "api" in prompt.lower()
+    assert "gh pr comment 5 --repo acme/demo --body-file <final-verdict.md>" in prompt

@@ -45,11 +45,6 @@ State is stored under `.dani/` by default:
 - `runs/` for generated OMX prompt/script artifacts
 
 
-## GitHub helper for agents
-Agents should use the bundled PyGithub helper instead of `gh` subprocess calls:
-
-```bash
-python /absolute/path/to/dani/github_helper.py issue-comment --repo owner/name --issue 123 --body-file comment.md
-python /absolute/path/to/dani/github_helper.py pr-comment --repo owner/name --pr 456 --body-file review.md
-python /absolute/path/to/dani/github_helper.py ensure-pr --repo owner/name --head feature/#123 --base dev --title "Feature/#123" --body-file pr-body.md
-```
+## GitHub surfaces
+- OMX sessions should use `gh` for issue comments, PR comments, and PR creation/update.
+- `dani/github.py` and `dani/github_helper.py` remain PyGithub-backed internal surfaces for dani runtime logic.
