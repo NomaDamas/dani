@@ -15,11 +15,13 @@ Task: review GitHub issue #$issue_number titled "$issue_title".
 Issue body:
 $issue_body
 
-Write a GitHub issue comment that includes:
-1. Why this issue is needed
-2. Why this issue may not be needed
-3. A concise implementation plan
-4. Agent Signature
+Write a GitHub issue comment that includes these clearly labeled sections:
+1. AI-understood issue summary
+2. Why this issue is needed
+3. Why this issue may not be needed
+4. Expected Outcome
+5. A concise implementation plan
+6. Agent Signature
 
 Use this exact signature somewhere in the comment:
 $signature
@@ -91,6 +93,7 @@ Recent discussion:
 $discussion
 
 Use the code locally, review the changes, and leave exactly one GitHub PR comment summarizing the review findings.
+The comment must include the real result of actual execution, not just abstract review notes. Show concrete evidence that matches the surface area you tested: screenshot or video for web, actual CLI output for CLI flows, and actual API call result for backend flows.
 Include this exact signature in the comment:
 $signature
 
@@ -111,6 +114,7 @@ Review history:
 $discussion
 
 Leave exactly one final GitHub PR comment with APPROVE or REJECT and a short reason.
+Before the verdict, include the real result of actual execution, not just a summary. Show concrete evidence that matches the product surface you verified: screenshot or video for web, actual CLI output for CLI flows, and actual API call result for backend flows.
 If you approve, include this exact signature in the comment:
 $approve_signature
 If you reject, include this exact signature in the comment:
