@@ -274,6 +274,29 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
     assert omx_runner.launches[-1]["job"].review_round == 2
 
 
+def test_final_verdict_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="final_verdict", pr_number=77)
+    approve_signature = build_signature(stage="final_verdict", job=job.id, pr=77, verdict="APPROVE")
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="review-job", pr=77, round=3))
+    github.add_pr_signature("acme/demo", 77, approve_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_final_verdict_verification_rejects_unrelated_signed_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="final_verdict", pr_number=77)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="review-job", pr=77, round=3))
+
+    with pytest.raises(RuntimeError, match="final-verdict-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     github.open_issues["acme/demo"] = [
