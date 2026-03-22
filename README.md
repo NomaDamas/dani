@@ -7,7 +7,7 @@ Simple GitHub webhook -> OMX automation loop.
 - FastAPI webhook server
 - Registered repos only
 - Repo-serial / cross-repo parallel job handling
-- `omx --madmax` tmux launches
+- non-interactive `omx exec` / `omx exec resume` launches
 - Separate prompt templates in `dani/prompts.py`
 - Workflows for:
   - issue request report
@@ -19,14 +19,13 @@ Simple GitHub webhook -> OMX automation loop.
 Required local tools:
 - `git`
 - `omx`
-- `tmux`
 
 Required environment variables:
 - `DANI_WEBHOOK_SECRET`
 - `DANI_GITHUB_TOKEN` (preferred) or `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT`
 
 ## Codex/OMX trust prerequisite
-Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx` or `codex` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
+Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx exec 'hello'` or `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
 
 ## CLI
 ```bash

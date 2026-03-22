@@ -125,8 +125,7 @@ class FakeOmxRunner:
         return SessionRecord(
             repo_full_name=repo_full_name,
             stage=job.stage,
-            tmux_session=f"tmux-{job.id}",
-            pane_id="%1",
+            runtime_handle=f"runtime-{job.id}",
             prompt_path=str(repo_path / "prompt.txt"),
             script_path=str(repo_path / "run.sh"),
             worktree_path=str(repo_path),
@@ -153,8 +152,7 @@ class FakeOmxRunner:
         return SessionRecord(
             repo_full_name=job.repo_full_name,
             stage=job.stage,
-            tmux_session=f"tmux-{job.id}",
-            pane_id="%1",
+            runtime_handle=f"runtime-{job.id}",
             prompt_path=str(repo_path / "prompt.txt"),
             script_path=str(repo_path / "run.sh"),
             worktree_path=str(repo_path),
@@ -165,8 +163,8 @@ class FakeOmxRunner:
             omx_session_id=omx_session_id,
         )
 
-    def wait(self, tmux_session: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+    def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
         return None
 
-    def close_session(self, tmux_session: str) -> None:
-        self.closed_sessions.append(tmux_session)
+    def close_session(self, runtime_handle: str) -> None:
+        self.closed_sessions.append(runtime_handle)

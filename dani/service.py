@@ -174,7 +174,7 @@ class DaniService:
                 session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
             self.storage.create_session(session)
             self.storage.update_job(job.id, status="launched", session_id=session.id)
-            self.omx_runner.wait(session.tmux_session)
+            self.omx_runner.wait(session.runtime_handle)
             self._verify_side_effect(repo, job)
             self._finalize_session(session, status="completed", termination_reason="completed")
             self.storage.update_job(job.id, status="completed")
@@ -185,7 +185,7 @@ class DaniService:
 
     def _finalize_session(self, session: SessionRecord, *, status: str, termination_reason: str) -> None:
         try:
-            self.omx_runner.close_session(session.tmux_session)
+            self.omx_runner.close_session(session.runtime_handle)
         finally:
             self.storage.update_session(
                 session.id,

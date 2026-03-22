@@ -46,7 +46,7 @@ class JobRecord:
 class SessionRecord:
     repo_full_name: str
     stage: str
-    tmux_session: str
+    runtime_handle: str
     prompt_path: str
     script_path: str
     worktree_path: str
@@ -55,8 +55,9 @@ class SessionRecord:
     pr_number: int | None = None
     review_round: int | None = None
     omx_session_id: str | None = None
+    stdout_path: str | None = None
+    stderr_path: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
-    pane_id: str | None = None
     status: str = "launched"
     ended_at: str | None = None
     termination_reason: str | None = None
