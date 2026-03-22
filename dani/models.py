@@ -58,6 +58,8 @@ class SessionRecord:
     id: str = field(default_factory=lambda: uuid4().hex)
     pane_id: str | None = None
     status: str = "launched"
+    ended_at: str | None = None
+    termination_reason: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 

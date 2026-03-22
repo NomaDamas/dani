@@ -85,6 +85,7 @@ class FakeOmxRunner:
         self.github = github
         self.launches: list[LaunchRecord] = []
         self.resumes: list[ResumeRecord] = []
+        self.closed_sessions: list[str] = []
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
@@ -166,3 +167,6 @@ class FakeOmxRunner:
 
     def wait(self, tmux_session: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
         return None
+
+    def close_session(self, tmux_session: str) -> None:
+        self.closed_sessions.append(tmux_session)
