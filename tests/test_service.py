@@ -103,7 +103,6 @@ def test_general_issue_comment_resumes_existing_issue_session(tmp_path: Path) ->
     assert len(followup_jobs) == 1
 
 
-
 def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
 

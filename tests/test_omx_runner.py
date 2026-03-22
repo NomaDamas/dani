@@ -17,32 +17,26 @@ def test_capture_omx_session_id_matches_signature_and_repo_path(tmp_path: Path) 
     signature = build_signature(stage="issue_request", job="job-123", issue=7)
     session_file = session_day_dir / "rollout-2026-03-19T11-26-54-session-123.jsonl"
     session_file.write_text(
-        "\n".join(
-            [
-                json.dumps(
-                    {
-                        "timestamp": "2026-03-19T02:26:54.703Z",
-                        "type": "session_meta",
-                        "payload": {
-                            "id": "session-123",
-                            "cwd": str(repo_path),
-                            "originator": "codex-tui",
-                        },
-                    }
-                ),
-                json.dumps(
-                    {
-                        "timestamp": "2026-03-19T02:26:56.936Z",
-                        "type": "response_item",
-                        "payload": {
-                            "type": "message",
-                            "role": "user",
-                            "content": [{"type": "input_text", "text": f"Prompt with {signature}"}],
-                        },
-                    }
-                ),
-            ]
-        ),
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-03-19T02:26:54.703Z",
+                "type": "session_meta",
+                "payload": {
+                    "id": "session-123",
+                    "cwd": str(repo_path),
+                    "originator": "codex-tui",
+                },
+            }),
+            json.dumps({
+                "timestamp": "2026-03-19T02:26:56.936Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": f"Prompt with {signature}"}],
+                },
+            }),
+        ]),
         encoding="utf-8",
     )
     started_at = time.time() - 1

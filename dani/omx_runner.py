@@ -87,12 +87,7 @@ class OmxRunner:
         quoted_repo = shlex.quote(str(repo_path))
         quoted_prompt = shlex.quote(str(prompt_path))
         quoted_session_id = shlex.quote(omx_session_id)
-        return (
-            "#!/bin/sh\n"
-            "set -eu\n"
-            f"cd {quoted_repo}\n"
-            f'exec omx resume {quoted_session_id} "$(cat {quoted_prompt})"\n'
-        )
+        return f'#!/bin/sh\nset -eu\ncd {quoted_repo}\nexec omx resume {quoted_session_id} "$(cat {quoted_prompt})"\n'
 
     def _tmux_pane_id(self, tmux_session: str) -> str:
         completed = subprocess.run(  # noqa: S603
@@ -129,7 +124,9 @@ class OmxRunner:
         deadline = time.monotonic() + timeout_seconds
         repo_path_str = str(repo_path)
         while time.monotonic() < deadline:
-            for session_file in sorted(self.sessions_root.rglob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True):
+            for session_file in sorted(
+                self.sessions_root.rglob("*.jsonl"), key=lambda item: item.stat().st_mtime, reverse=True
+            ):
                 if session_file.stat().st_mtime < started_at - 1:
                     continue
                 payload = self._session_meta_payload(session_file)

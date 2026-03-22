@@ -279,7 +279,9 @@ class DaniService:
                 raise RuntimeError("issue-request-comment-missing")
             return
         if job.stage == "issue_followup":
-            latest_comment = self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue")
+            latest_comment = self.github.latest_signature_comment(
+                repo.full_name, int(job.issue_number or 0), kind="issue"
+            )
             if latest_comment is None or latest_comment[1].get("stage") != "issue_followup":
                 raise RuntimeError("issue-followup-comment-missing")
             return
@@ -355,7 +357,9 @@ class DaniService:
         msg = "missing-omx-session-id"
         raise RuntimeError(msg)
 
-    def _queue_pull_request_review(self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None) -> dict[str, Any]:
+    def _queue_pull_request_review(
+        self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
+    ) -> dict[str, Any]:
         if event.base_branch == repo.main_branch:
             return {"status": "ignored", "reason": "release_loop_excluded"}
         issue_number = None

@@ -135,14 +135,12 @@ class FakeOmxRunner:
             issue_number,
             build_signature(stage="issue_followup", job=job.id, issue=issue_number),
         )
-        self.resumes.append(
-            {
-                "repo_path": str(repo_path),
-                "job": job,
-                "prompt": prompt,
-                "omx_session_id": omx_session_id,
-            }
-        )
+        self.resumes.append({
+            "repo_path": str(repo_path),
+            "job": job,
+            "prompt": prompt,
+            "omx_session_id": omx_session_id,
+        })
         return SessionRecord(
             repo_full_name=job.repo_full_name,
             stage=job.stage,
