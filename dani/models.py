@@ -54,6 +54,7 @@ class SessionRecord:
     issue_number: int | None = None
     pr_number: int | None = None
     review_round: int | None = None
+    omx_session_id: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
     pane_id: str | None = None
     status: str = "launched"

@@ -25,6 +25,9 @@ Required environment variables:
 - `DANI_WEBHOOK_SECRET`
 - `DANI_GITHUB_TOKEN` (preferred) or `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT`
 
+## Codex/OMX trust prerequisite
+Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx` or `codex` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
+
 ## CLI
 ```bash
 dani register-repo owner/name /absolute/path/to/repo

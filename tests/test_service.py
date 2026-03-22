@@ -24,6 +24,27 @@ def make_service(tmp_path: Path) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRun
     return service, github, omx_runner
 
 
+def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=21,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    session = service.storage.list_sessions()[0]
+    assert session.omx_session_id == "omx-" + session.job_id
+
+
 def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
@@ -43,6 +64,64 @@ def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
     assert result["status"] == "queued"
     assert omx_runner.launches[0]["job"].stage == "issue_request"
     assert service.storage.list_jobs()[0].status == "completed"
+
+
+def test_general_issue_comment_resumes_existing_issue_session(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=31,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=31,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please reconsider the edge cases.",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "issue_followup"
+    assert omx_runner.resumes[-1]["omx_session_id"].startswith("omx-")
+    assert omx_runner.resumes[-1]["job"].stage == "issue_followup"
+    followup_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=31)
+    assert len(followup_jobs) == 1
+
+
+
+def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=32,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please reconsider the edge cases.",
+            title="Need automation",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "missing_issue_session"}
+    assert omx_runner.resumes == []
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:

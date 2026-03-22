@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig
+from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
@@ -94,42 +94,16 @@ class DaniService:
             return self._handle_agent_event(event, signature)
 
         if event.kind == "issue_opened":
-            job = self._enqueue_job(
-                repo,
-                stage="issue_request",
-                issue_number=event.number,
-                metadata={"title": event.title or "", "body": event.body or ""},
-            )
-            return {"status": "queued", "job_id": job.id, "stage": job.stage}
+            return self._queue_issue_request(repo, event)
 
         if event.kind == "issue_comment" and self._is_approve_comment(event.body):
-            job = self._enqueue_job(
-                repo,
-                stage="implementation",
-                issue_number=event.number,
-                metadata={"title": event.title or "", "body": event.payload.get("issue", {}).get("body", "")},
-            )
-            return {"status": "queued", "job_id": job.id, "stage": job.stage}
+            return self._queue_implementation(repo, event)
+
+        if event.kind == "issue_comment":
+            return self._queue_issue_followup(repo, event)
 
         if event.kind == "pull_request_opened":
-            if event.base_branch == repo.main_branch:
-                return {"status": "ignored", "reason": "release_loop_excluded"}
-            issue_number = None
-            if signature and signature.get("issue"):
-                issue_number = int(signature["issue"])
-                if signature.get("job") and self.storage.get_job(signature["job"]) is not None:
-                    self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
-            if issue_number is None:
-                issue_number = self._extract_issue_number(event.body)
-            job = self._enqueue_job(
-                repo,
-                stage="review_round",
-                issue_number=issue_number,
-                pr_number=event.number,
-                review_round=1,
-                metadata={"title": event.title or "", "body": event.body or ""},
-            )
-            return {"status": "queued", "job_id": job.id, "stage": job.stage}
+            return self._queue_pull_request_review(repo, event, signature)
 
         return {"status": "ignored", "reason": "unsupported_event"}
 
@@ -199,7 +173,10 @@ class DaniService:
         session = None
         try:
             prompt = self._build_prompt(repo, job)
-            session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
+            if job.stage == "issue_followup":
+                session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
+            else:
+                session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
             self.storage.create_session(session)
             self.storage.update_job(job.id, status="launched", session_id=session.id)
             self.omx_runner.wait(session.tmux_session)
@@ -248,6 +225,21 @@ class DaniService:
                 },
             )
 
+        if job.stage == "issue_followup":
+            return render_prompt(
+                "issue_followup",
+                {
+                    "repo": repo.full_name,
+                    "local_path": repo.local_path,
+                    "issue_number": issue_number,
+                    "issue_title": issue_title,
+                    "issue_body": issue_body,
+                    "comment_body": job.metadata.get("comment_body", ""),
+                    "signature": build_signature(stage="issue_followup", job=job.id, issue=issue_number),
+                    "github_helper": self._github_helper_command(),
+                },
+            )
+
         if job.stage == "review_round":
             return render_prompt(
                 "review_round",
@@ -286,6 +278,11 @@ class DaniService:
             if self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue") is None:
                 raise RuntimeError("issue-request-comment-missing")
             return
+        if job.stage == "issue_followup":
+            latest_comment = self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue")
+            if latest_comment is None or latest_comment[1].get("stage") != "issue_followup":
+                raise RuntimeError("issue-followup-comment-missing")
+            return
         if job.stage == "implementation":
             signature = build_signature(stage="implementation", job=job.id, issue=int(job.issue_number or 0))
             if self.github.find_pr_by_signature(repo.full_name, signature) is None:
@@ -311,3 +308,85 @@ class DaniService:
         if match is None:
             return None
         return int(match.group("number"))
+
+    def _queue_issue_request(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        job = self._enqueue_job(
+            repo,
+            stage="issue_request",
+            issue_number=event.number,
+            metadata={"title": event.title or "", "body": event.body or ""},
+        )
+        return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _queue_implementation(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        job = self._enqueue_job(
+            repo,
+            stage="implementation",
+            issue_number=event.number,
+            metadata={"title": event.title or "", "body": event.payload.get("issue", {}).get("body", "")},
+        )
+        return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _queue_issue_followup(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        session = self._latest_resumable_session(
+            repo_full_name=event.repo_full_name,
+            stage="issue_request",
+            issue_number=event.number,
+        )
+        if session is None or session.omx_session_id is None:
+            return {"status": "ignored", "reason": "missing_issue_session"}
+        job = self._enqueue_job(
+            repo,
+            stage="issue_followup",
+            issue_number=event.number,
+            metadata={
+                "title": event.title or "",
+                "body": event.payload.get("issue", {}).get("body", ""),
+                "comment_body": event.body or "",
+                "omx_session_id": session.omx_session_id,
+            },
+        )
+        return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _omx_session_id_for(self, job: JobRecord) -> str:
+        omx_session_id = job.metadata.get("omx_session_id")
+        if isinstance(omx_session_id, str) and omx_session_id:
+            return omx_session_id
+        msg = "missing-omx-session-id"
+        raise RuntimeError(msg)
+
+    def _queue_pull_request_review(self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None) -> dict[str, Any]:
+        if event.base_branch == repo.main_branch:
+            return {"status": "ignored", "reason": "release_loop_excluded"}
+        issue_number = None
+        if signature and signature.get("issue"):
+            issue_number = int(signature["issue"])
+            if signature.get("job") and self.storage.get_job(signature["job"]) is not None:
+                self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
+        if issue_number is None:
+            issue_number = self._extract_issue_number(event.body)
+        job = self._enqueue_job(
+            repo,
+            stage="review_round",
+            issue_number=issue_number,
+            pr_number=event.number,
+            review_round=1,
+            metadata={"title": event.title or "", "body": event.body or ""},
+        )
+        return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _latest_resumable_session(
+        self,
+        *,
+        repo_full_name: str,
+        stage: str,
+        issue_number: int | None = None,
+        pr_number: int | None = None,
+    ) -> SessionRecord | None:
+        return self.storage.find_latest_session(
+            repo_full_name=repo_full_name,
+            stage=stage,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            require_omx_session_id=True,
+        )
