@@ -74,10 +74,13 @@ Requirements:
 - Make all tests pass
 - Actually run the code and verify behavior
 - Create/update branch named like feature/#$issue_number
-- Open or update a PR targeting $dev_branch with gh:
-  gh pr create --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
-  If the PR already exists, update it with:
-  gh pr edit --repo $repo --head feature/#$issue_number --title "Feature/#$issue_number" --body-file <pr-body.md>
+- Commit and push your changes to feature/#$issue_number
+- Ensure there is a PR targeting $dev_branch for feature/#$issue_number
+  - If no PR exists, create it with:
+    gh pr create --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
+  - If a PR already exists, push new commits to the same branch so the PR updates automatically
+  - Update the PR body only if needed to keep the description/signature accurate
+  - Leave a PR comment if needed to summarize what changed in this update
 - Put this signature in the PR body:
 $signature
 
@@ -95,13 +98,13 @@ $pr_body
 Recent discussion:
 $discussion
 
-Use the code locally and leave exactly one GitHub PR comment summarizing the review findings.
+Use the code locally and run $$code-review before writing the review comment.
+Do real verification, not only static inspection.
 Checklist:
-- [ ] Real Result
-- [ ] Use actual execution evidence, not only abstract review notes
-- [ ] Web: screenshot or video when relevant
-- [ ] CLI: actual output when relevant
-- [ ] Backend: actual API call result when relevant
+- [ ] Use $$code-review
+- [ ] Run the code or tests needed to validate behavior
+- [ ] Include Real Result from actual verification
+- [ ] Include concrete evidence appropriate for what you verified
 - [ ] Include this exact signature: $signature
 
 Post it with gh:
@@ -124,11 +127,8 @@ Leave exactly one final GitHub PR comment.
 Checklist:
 - [ ] Verdict: APPROVE or REJECT
 - [ ] Short reason
-- [ ] Real Result
-- [ ] Use actual execution evidence, not only summary text
-- [ ] Web: screenshot or video when relevant
-- [ ] CLI: actual output when relevant
-- [ ] Backend: actual API call result when relevant
+- [ ] Real Result from actual verification
+- [ ] Include concrete evidence appropriate for what you verified
 - [ ] If APPROVE, include: $approve_signature
 - [ ] If REJECT, include: $reject_signature
 

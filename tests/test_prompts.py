@@ -20,6 +20,25 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
+def test_implementation_prompt_prefers_push_over_pr_edit_for_existing_pr() -> None:
+    prompt = render_prompt(
+        "implementation",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "approved",
+            "dev_branch": "dev",
+            "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "push new commits to the same branch so the PR updates automatically" in prompt
+    assert "gh pr edit" not in prompt
+
+
 def test_issue_request_prompt_uses_gh_instructions() -> None:
     prompt = render_prompt(
         "issue_request",
@@ -54,7 +73,7 @@ def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None
     assert "Expected Outcome" in prompt
 
 
-def test_review_round_prompt_requires_real_result_evidence() -> None:
+def test_review_round_prompt_requires_code_review_and_verification() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -68,7 +87,9 @@ def test_review_round_prompt_requires_real_result_evidence() -> None:
         },
     )
 
-    assert "real result" in prompt.lower()
+    assert "$code-review" in prompt
+    assert "actual verification" in prompt.lower()
+    assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
@@ -90,7 +111,7 @@ def test_final_verdict_prompt_contains_both_signatures() -> None:
     assert "verdict=REJECT" in prompt
 
 
-def test_final_verdict_prompt_requires_real_result_evidence() -> None:
+def test_final_verdict_prompt_requires_general_real_result_evidence() -> None:
     prompt = render_prompt(
         "final_verdict",
         {
@@ -104,8 +125,9 @@ def test_final_verdict_prompt_requires_real_result_evidence() -> None:
         },
     )
 
-    assert "real result" in prompt.lower()
-    assert "screenshot" in prompt.lower()
-    assert "cli" in prompt.lower()
-    assert "api" in prompt.lower()
+    assert "real result from actual verification" in prompt.lower()
+    assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <final-verdict.md>" in prompt
+    assert "web:" not in prompt.lower()
+    assert "cli:" not in prompt.lower()
+    assert "backend:" not in prompt.lower()
