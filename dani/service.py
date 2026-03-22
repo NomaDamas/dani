@@ -110,6 +110,9 @@ class DaniService:
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
         if stage == "review_round":
+            event_key = self._agent_event_key(signature)
+            if not self.storage.record_processed_event(event_key):
+                return {"status": "ignored", "reason": "duplicate_agent_event"}
             review_round = int(signature["round"])
             pr_number = int(signature["pr"])
             if review_round < self.config.review_rounds:
@@ -291,14 +294,44 @@ class DaniService:
                 raise RuntimeError("implementation-pr-missing")
             return
         if job.stage == "review_round":
-            if self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None:
-                raise RuntimeError("review-comment-missing")
+            self._verify_review_round_side_effect(repo, job)
             return
-        if (
-            job.stage == "final_verdict"
-            and self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None
+        if job.stage == "final_verdict":
+            self._verify_final_verdict_side_effect(repo, job)
+
+    def _verify_review_round_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        signature = build_signature(
+            stage="review_round",
+            job=job.id,
+            pr=int(job.pr_number or 0),
+            round=job.review_round or 1,
+        )
+        if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
+            raise RuntimeError("review-comment-missing")
+
+    def _verify_final_verdict_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        approve_signature = build_signature(
+            stage="final_verdict",
+            job=job.id,
+            pr=int(job.pr_number or 0),
+            verdict="APPROVE",
+        )
+        reject_signature = build_signature(
+            stage="final_verdict",
+            job=job.id,
+            pr=int(job.pr_number or 0),
+            verdict="REJECT",
+        )
+        if not (
+            self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), approve_signature)
+            or self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), reject_signature)
         ):
             raise RuntimeError("final-verdict-comment-missing")
+
+    def _has_exact_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> bool:
+        return bool(
+            self.github.find_comments_by_signature(repo_full_name, pr_number, kind="pr", signature_fragment=signature)
+        )
 
     def _is_approve_comment(self, body: str | None) -> bool:
         return bool(body and "/approve" in body.lower())
@@ -394,3 +427,11 @@ class DaniService:
             pr_number=pr_number,
             require_omx_session_id=True,
         )
+
+    def _agent_event_key(self, signature: dict[str, str]) -> str:
+        fields = [("stage", signature.get("stage", ""))]
+        for key in ("pr", "round", "job", "verdict"):
+            value = signature.get(key)
+            if value:
+                fields.append((key, value))
+        return ";".join(f"{key}={value}" for key, value in fields)

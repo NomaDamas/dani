@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
@@ -221,6 +223,78 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
     service.handle_event(verdict_event)
 
     assert github.merged == [("acme/demo", 77)]
+
+
+def test_review_round_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="review_round", pr_number=77, review_round=2)
+    expected_signature = build_signature(stage="review_round", job=job.id, pr=77, round=2)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="stale-job", pr=77, round=1))
+    github.add_pr_signature("acme/demo", 77, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_review_round_verification_rejects_stale_signed_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="review_round", pr_number=77, review_round=2)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="stale-job", pr=77, round=1))
+
+    with pytest.raises(RuntimeError, match="review-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
+def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job="job-1", pr=77, round=1),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)
+    assert first["status"] == "queued"
+    assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
+    assert [job.review_round for job in review_jobs] == [2]
+    assert omx_runner.launches[-1]["job"].review_round == 2
+
+
+def test_final_verdict_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="final_verdict", pr_number=77)
+    approve_signature = build_signature(stage="final_verdict", job=job.id, pr=77, verdict="APPROVE")
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="review-job", pr=77, round=3))
+    github.add_pr_signature("acme/demo", 77, approve_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_final_verdict_verification_rejects_unrelated_signed_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="final_verdict", pr_number=77)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="review-job", pr=77, round=3))
+
+    with pytest.raises(RuntimeError, match="final-verdict-comment-missing"):
+        service._verify_side_effect(repo, job)
 
 
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:

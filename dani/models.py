@@ -105,5 +105,9 @@ class DaniConfig:
         return self.data_dir / "events.jsonl"
 
     @property
+    def processed_events_path(self) -> Path:
+        return self.data_dir / "processed-events.json"
+
+    @property
     def run_dir(self) -> Path:
         return self.data_dir / "runs"
