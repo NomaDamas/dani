@@ -36,7 +36,7 @@ dani show-state
 ```
 
 ## Persistence
-State is stored under `.dani/` by default:
+State is stored under `~/.dani/` by default:
 - `registry.json`
 - `jobs.json`
 - `sessions.json`
