@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from unittest.mock import call, patch
 
 from dani.omx_runner import OmxRunner
 from dani.signatures import build_signature
@@ -51,3 +52,31 @@ def test_capture_omx_session_id_matches_signature_and_repo_path(tmp_path: Path) 
     )
 
     assert omx_session_id == "session-123"
+
+
+def test_close_session_kills_existing_tmux_session(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+
+    with patch("dani.omx_runner.subprocess.run") as run:
+        run.side_effect = [
+            type("Completed", (), {"returncode": 0})(),
+            type("Completed", (), {"returncode": 0})(),
+        ]
+
+        runner.close_session("tmux-123")
+
+    assert run.call_args_list == [
+        call(["tmux", "has-session", "-t", "tmux-123"], capture_output=True, text=True),
+        call(["tmux", "kill-session", "-t", "tmux-123"], check=True),
+    ]
+
+
+def test_close_session_skips_missing_tmux_session(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+
+    with patch("dani.omx_runner.subprocess.run") as run:
+        run.return_value = type("Completed", (), {"returncode": 1})()
+
+        runner.close_session("tmux-123")
+
+    assert run.call_args_list == [call(["tmux", "has-session", "-t", "tmux-123"], capture_output=True, text=True)]

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord
+from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
@@ -183,13 +183,24 @@ class DaniService:
             self.storage.create_session(session)
             self.storage.update_job(job.id, status="launched", session_id=session.id)
             self.omx_runner.wait(session.tmux_session)
-            self.storage.update_session(session.id, status="completed")
             self._verify_side_effect(repo, job)
+            self._finalize_session(session, status="completed", termination_reason="completed")
             self.storage.update_job(job.id, status="completed")
         except Exception as exc:
             if session is not None:
-                self.storage.update_session(session.id, status="failed")
+                self._finalize_session(session, status="failed", termination_reason=type(exc).__name__)
             self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": str(exc)})
+
+    def _finalize_session(self, session: SessionRecord, *, status: str, termination_reason: str) -> None:
+        try:
+            self.omx_runner.close_session(session.tmux_session)
+        finally:
+            self.storage.update_session(
+                session.id,
+                status=status,
+                ended_at=utc_now(),
+                termination_reason=termination_reason,
+            )
 
     def _build_prompt(self, repo: RepoConfig, job: JobRecord) -> str:
         issue_number = job.issue_number or 0

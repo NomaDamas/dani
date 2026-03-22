@@ -66,6 +66,11 @@ def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
     assert result["status"] == "queued"
     assert omx_runner.launches[0]["job"].stage == "issue_request"
     assert service.storage.list_jobs()[0].status == "completed"
+    assert omx_runner.closed_sessions == [f"tmux-{service.storage.list_jobs()[0].id}"]
+    session = service.storage.list_sessions()[0]
+    assert session.status == "completed"
+    assert session.ended_at is not None
+    assert session.termination_reason == "completed"
 
 
 def test_general_issue_comment_resumes_existing_issue_session(tmp_path: Path) -> None:
@@ -144,6 +149,20 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     assert result["stage"] == "implementation"
     assert omx_runner.launches[0]["job"].stage == "implementation"
     assert service.storage.list_jobs()[0].status == "completed"
+
+
+def test_failed_job_still_closes_tmux_session_and_marks_failure(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    session = omx_runner.launch(Path(tmp_path), JobRecord(repo_full_name="acme/demo", stage="implementation"), "")
+    service.storage.create_session(session)
+
+    service._finalize_session(session, status="failed", termination_reason="RuntimeError")
+
+    stored = service.storage.list_sessions()[0]
+    assert stored.status == "failed"
+    assert stored.ended_at is not None
+    assert stored.termination_reason == "RuntimeError"
+    assert omx_runner.closed_sessions == [session.tmux_session]
 
 
 def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: Path) -> None:

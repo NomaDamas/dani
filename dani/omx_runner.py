@@ -108,6 +108,12 @@ class OmxRunner:
         msg = f"tmux session did not exit before timeout: {tmux_session}"
         raise TimeoutError(msg)
 
+    def close_session(self, tmux_session: str) -> None:
+        completed = subprocess.run(["tmux", "has-session", "-t", tmux_session], capture_output=True, text=True)  # noqa: S603
+        if completed.returncode != 0:
+            return
+        subprocess.run(["tmux", "kill-session", "-t", tmux_session], check=True)  # noqa: S603
+
     def _capture_omx_session_id(
         self,
         *,
