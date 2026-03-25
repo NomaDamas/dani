@@ -50,6 +50,22 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             is_pull_request=is_pr,
         )
 
+    if event_name == "push":
+        ref = payload.get("ref")
+        commit_sha = payload.get("after")
+        if not ref or not commit_sha or payload.get("deleted"):
+            return None
+        return NormalizedEvent(
+            kind="branch_push",
+            repo_full_name=repo_full_name,
+            action="push",
+            number=0,
+            actor_login=payload["sender"]["login"],
+            payload=payload,
+            ref=ref,
+            commit_sha=commit_sha,
+        )
+
     if event_name == "pull_request" and action == "opened":
         pull_request = payload["pull_request"]
         return NormalizedEvent(

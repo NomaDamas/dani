@@ -80,6 +80,8 @@ class NormalizedEvent:
     title: str | None = None
     base_branch: str | None = None
     head_branch: str | None = None
+    ref: str | None = None
+    commit_sha: str | None = None
     is_pull_request: bool = False
 
 
