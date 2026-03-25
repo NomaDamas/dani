@@ -7,16 +7,24 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from typing import Protocol, TextIO
 from uuid import uuid4
 
 from dani.models import JobRecord, SessionRecord
+
+
+class ManagedProcess(Protocol):
+    def poll(self) -> object: ...
+    def terminate(self) -> None: ...
+    def wait(self, timeout: float | None = None) -> object: ...
+    def kill(self) -> None: ...
 
 
 class OmxRunner:
     def __init__(self, run_dir: Path, sessions_root: Path | None = None) -> None:
         self.run_dir = run_dir
         self.sessions_root = sessions_root or (Path.home() / ".codex" / "sessions")
-        self._processes: dict[str, tuple[subprocess.Popen[bytes], object, object]] = {}
+        self._processes: dict[str, tuple[ManagedProcess, TextIO, TextIO]] = {}
         self._lock = threading.RLock()
         self.run_dir.mkdir(parents=True, exist_ok=True)
 

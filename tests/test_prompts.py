@@ -11,8 +11,11 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
             "discussion": "approved",
+            "pr_context": "",
+            "pr_number": "",
             "dev_branch": "dev",
             "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+            "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
         },
     )
 
@@ -30,13 +33,39 @@ def test_implementation_prompt_prefers_push_over_pr_edit_for_existing_pr() -> No
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
             "discussion": "approved",
+            "pr_context": "",
+            "pr_number": "",
             "dev_branch": "dev",
             "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+            "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
         },
     )
 
     assert "push new commits to the same branch so the PR updates automatically" in prompt
     assert "gh pr edit" not in prompt
+
+
+def test_implementation_prompt_for_existing_pr_requires_signed_followup_comment() -> None:
+    prompt = render_prompt(
+        "implementation",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "approved",
+            "pr_context": "Existing PR context:\nPR #39\n\nPR review/comment history to address:\nPlease fix the failing case.",
+            "pr_number": 39,
+            "dev_branch": "dev",
+            "signature": "<!-- dani:stage=implementation;job=abc;issue=7;pr=39 -->",
+            "signature_instructions": "Post it with:\n gh pr comment 39 --repo acme/demo --body-file <implementation-update.md>",
+        },
+    )
+
+    assert "Existing PR context" in prompt
+    assert "Please fix the failing case." in prompt
+    assert "gh pr comment 39 --repo acme/demo --body-file <implementation-update.md>" in prompt
 
 
 def test_issue_request_prompt_uses_gh_instructions() -> None:

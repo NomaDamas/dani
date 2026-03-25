@@ -9,18 +9,24 @@ from dani.omx_runner import OmxRunner
 from dani.service import DaniService
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitHubCLI, FakeOmxRunner
+from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
 
 TEST_SECRET = "unit-test-secret"
 
 
-def make_service(tmp_path: Path) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRunner]:
+def make_service(
+    tmp_path: Path, *, dev_syncer: FakeGitDevSyncer | None = None
+) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRunner]:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     omx_runner = FakeOmxRunner(github)
     service = DaniService(
-        config, storage=storage, github=cast(GitHubCLI, github), omx_runner=cast(OmxRunner, omx_runner)
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(OmxRunner, omx_runner),
+        dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
     return service, github, omx_runner
@@ -208,25 +214,80 @@ def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: P
 
 def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
+    pr_event = NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action="opened",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=f"Implements #5\n{build_signature(stage='implementation', job='impl-open', issue=5)}",
+        title="Feature/#5",
+        base_branch="dev",
+        head_branch="feature/#5",
+        is_pull_request=True,
+    )
+    service.handle_event(pr_event)
+    service.wait_for_idle()
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)
+    assert [job.review_round for job in review_jobs] == [1]
 
     for round_number in (1, 2, 3):
-        event = NormalizedEvent(
+        review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)[-1]
+        review_event = NormalizedEvent(
             kind="pull_request_comment",
             repo_full_name="acme/demo",
             action="created",
             number=77,
             actor_login="agent",
             payload={},
-            body=build_signature(stage="review_round", job=f"job-{round_number}", pr=77, round=round_number),
+            body=build_signature(
+                stage="review_round",
+                job=review_job.id,
+                pr=77,
+                round=round_number,
+                issue=5,
+            ),
             title="Feature/#5",
             is_pull_request=True,
         )
-        service.handle_event(event)
+        result = service.handle_event(review_event)
         service.wait_for_idle()
+        assert result["stage"] == "implementation"
+
+        implementation_job = service.storage.find_jobs(
+            repo_full_name="acme/demo", stage="implementation", pr_number=77
+        )[-1]
+        implementation_event = NormalizedEvent(
+            kind="pull_request_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=77,
+            actor_login="agent",
+            payload={},
+            body=build_signature(
+                stage="implementation",
+                job=implementation_job.id,
+                issue=5,
+                pr=77,
+            ),
+            title="Feature/#5",
+            is_pull_request=True,
+        )
+        result = service.handle_event(implementation_event)
+        service.wait_for_idle()
+        expected_stage = "final_verdict" if round_number == 3 else "review_round"
+        assert result["stage"] == expected_stage
 
     verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
     assert verdict_jobs
     assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert [
+        job.review_round
+        for job in service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)
+    ] == [1, 2, 3]
+    assert len(service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=77)) == 3
 
     verdict_event = NormalizedEvent(
         kind="pull_request_comment",
@@ -286,11 +347,35 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
     second = service.handle_event(event)
     service.wait_for_idle()
 
-    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)
+    implementation_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=77)
     assert first["status"] == "queued"
     assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
-    assert [job.review_round for job in review_jobs] == [2]
-    assert omx_runner.launches[-1]["job"].review_round == 2
+    assert len(implementation_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "implementation"
+    assert omx_runner.launches[-1]["job"].pr_number == 77
+
+
+def test_implementation_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="implementation", issue_number=5, pr_number=77)
+    expected_signature = build_signature(stage="implementation", job=job.id, issue=5, pr=77)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="implementation", job="stale-job", issue=5, pr=77))
+    github.add_pr_signature("acme/demo", 77, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_implementation_followup_verification_rejects_stale_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="implementation", issue_number=5, pr_number=77)
+    github.add_pr_signature("acme/demo", 77, build_signature(stage="implementation", job="stale-job", issue=5, pr=77))
+
+    with pytest.raises(RuntimeError, match="implementation-comment-missing"):
+        service._verify_side_effect(repo, job)
 
 
 def test_final_verdict_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -377,3 +462,97 @@ def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "release_loop_excluded"}
+
+
+def test_main_push_queues_dev_sync(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer()
+    service, _, _ = make_service(tmp_path, dev_syncer=dev_syncer)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="branch_push",
+            repo_full_name="acme/demo",
+            action="push",
+            number=0,
+            actor_login="human",
+            payload={},
+            ref="refs/heads/main",
+            commit_sha="abc123",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "dev_sync"
+    assert dev_syncer.sync_calls == [("acme/demo", "abc123")]
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")[0].status == "completed"
+
+
+def test_non_main_push_is_ignored(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer()
+    service, _, _ = make_service(tmp_path, dev_syncer=dev_syncer)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="branch_push",
+            repo_full_name="acme/demo",
+            action="push",
+            number=0,
+            actor_login="human",
+            payload={},
+            ref="refs/heads/dev",
+            commit_sha="abc123",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "non_main_push"}
+    assert dev_syncer.sync_calls == []
+
+
+def test_duplicate_main_push_is_ignored(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer()
+    service, _, _ = make_service(tmp_path, dev_syncer=dev_syncer)
+    event = NormalizedEvent(
+        kind="branch_push",
+        repo_full_name="acme/demo",
+        action="push",
+        number=0,
+        actor_login="human",
+        payload={},
+        ref="refs/heads/main",
+        commit_sha="abc123",
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert first["stage"] == "dev_sync"
+    assert second == {"status": "ignored", "reason": "duplicate_dev_sync"}
+    assert dev_syncer.sync_calls == [("acme/demo", "abc123")]
+
+
+def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer(conflict=True)
+    service, _, omx_runner = make_service(tmp_path, dev_syncer=dev_syncer)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="branch_push",
+            repo_full_name="acme/demo",
+            action="push",
+            number=0,
+            actor_login="human",
+            payload={},
+            ref="refs/heads/main",
+            commit_sha="abc123",
+        )
+    )
+    service.wait_for_idle()
+
+    jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")
+    assert result["stage"] == "dev_sync"
+    assert omx_runner.launches[-1]["job"].stage == "dev_sync"
+    assert len(dev_syncer.verify_calls) == 1
+    assert len(dev_syncer.cleanup_calls) == 1
+    assert jobs[0].status == "completed"

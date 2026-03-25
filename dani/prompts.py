@@ -67,6 +67,8 @@ $issue_body
 Discussion context:
 $discussion
 
+$pr_context
+
 Implement the approved change.
 Requirements:
 - Use $$ralph to finish the work
@@ -80,9 +82,7 @@ Requirements:
     gh pr create --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
   - If a PR already exists, push new commits to the same branch so the PR updates automatically
   - Update the PR body only if needed to keep the description/signature accurate
-  - Leave a PR comment if needed to summarize what changed in this update
-- Put this signature in the PR body:
-$signature
+$signature_instructions
 
 After creating or updating the PR, exit.
         """.strip()
@@ -136,6 +136,32 @@ Post it with gh:
 gh pr comment $pr_number --repo $repo --body-file <final-verdict.md>
 
 After posting the PR comment, exit.
+        """.strip()
+    ),
+    "dev_sync_conflict": Template(
+        """
+You are operating inside repository: $repo
+Local path: $local_path
+
+The worktree is already in a merge-conflict state.
+Goal: merge $main_branch commit $main_sha into $dev_branch and push directly to origin/$dev_branch.
+Temporary branch: $temp_branch
+
+Requirements:
+- Resolve every existing merge conflict in this worktree
+- Preserve intended behavior from both branches unless the codebase clearly indicates otherwise
+- Run the smallest relevant verification needed for the files you changed
+- Do not open a PR
+- Commit the resolved merge using this exact commit message:
+
+$commit_message
+
+- Push the resolved merge with:
+  git push origin HEAD:refs/heads/$dev_branch
+- Before exiting, make sure there are no unmerged files left:
+  git diff --name-only --diff-filter=U
+
+After the push succeeds, exit.
         """.strip()
     ),
 }
