@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dani.github import GitHubCLI
+from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
@@ -162,8 +162,42 @@ class DaniService:
             )
             return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
 
+        if stage == "merge_conflict_resolution":
+            repo = self.storage.get_repo(event.repo_full_name)
+            if repo is None:
+                return {"status": "ignored", "reason": "missing_repo"}
+            pr_number = int(signature["pr"])
+            verdict_job = self._enqueue_job(
+                repo,
+                stage="final_verdict",
+                pr_number=pr_number,
+                metadata={"title": event.title or "", "body": event.body or ""},
+            )
+            return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+
         if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
-            self.github.merge_pull_request(event.repo_full_name, int(signature["pr"]))
+            pr_number = int(signature["pr"])
+            try:
+                self.github.merge_pull_request(event.repo_full_name, pr_number)
+            except MergeConflictError as exc:
+                repo = self.storage.get_repo(event.repo_full_name)
+                if repo is None:
+                    return {"status": "ignored", "reason": "missing_repo"}
+                pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+                merge_conflict_job = self._enqueue_job(
+                    repo,
+                    stage="merge_conflict_resolution",
+                    issue_number=self._extract_issue_number(pull_request.get("body")),
+                    pr_number=pr_number,
+                    metadata={
+                        "title": pull_request.get("title") or event.title or f"PR #{pr_number}",
+                        "body": pull_request.get("body") or "",
+                        "head_branch": self._branch_ref(pull_request, "head"),
+                        "base_branch": self._branch_ref(pull_request, "base"),
+                        "conflict_reason": str(exc),
+                    },
+                )
+                return {"status": "queued", "job_id": merge_conflict_job.id, "stage": merge_conflict_job.stage}
             return {"status": "merged", "pr_number": int(signature["pr"])}
 
         return {"status": "updated", "stage": stage}
@@ -265,6 +299,24 @@ class DaniService:
                 },
             )
 
+        if job.stage == "merge_conflict_resolution":
+            return render_prompt(
+                "merge_conflict_resolution",
+                {
+                    "repo": repo.full_name,
+                    "local_path": repo.local_path,
+                    "issue_number": issue_number,
+                    "pr_number": pr_number,
+                    "pr_title": pr_title,
+                    "pr_body": pr_body,
+                    "head_branch": job.metadata.get("head_branch", ""),
+                    "base_branch": job.metadata.get("base_branch", repo.dev_branch),
+                    "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
+                    "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
+                    "github_helper": self._github_helper_command(),
+                },
+            )
+
         return render_prompt(
             "final_verdict",
             {
@@ -295,6 +347,10 @@ class DaniService:
             if self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None:
                 raise RuntimeError("review-comment-missing")
             return
+        if job.stage == "merge_conflict_resolution":
+            if self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None:
+                raise RuntimeError("merge-conflict-comment-missing")
+            return
         if (
             job.stage == "final_verdict"
             and self.github.latest_signature_comment(repo.full_name, int(job.pr_number or 0), kind="pr") is None
@@ -311,3 +367,11 @@ class DaniService:
         if match is None:
             return None
         return int(match.group("number"))
+
+    def _branch_ref(self, payload: dict[str, Any], key: str) -> str | None:
+        ref_payload = payload.get(key)
+        if isinstance(ref_payload, dict):
+            ref = ref_payload.get("ref")
+            if isinstance(ref, str) and ref:
+                return ref
+        return None

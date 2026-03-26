@@ -145,6 +145,68 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
     assert github.merged == [("acme/demo", 77)]
 
 
+def test_approve_verdict_with_merge_conflict_queues_resolution_job(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.merge_conflicts.add(("acme/demo", 77))
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+
+    verdict_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    result = service.handle_event(verdict_event)
+    service.wait_for_idle()
+
+    resolution_jobs = service.storage.find_jobs(
+        repo_full_name="acme/demo", stage="merge_conflict_resolution", pr_number=77
+    )
+    assert result["stage"] == "merge_conflict_resolution"
+    assert resolution_jobs
+    assert resolution_jobs[0].issue_number == 5
+    assert resolution_jobs[0].metadata["head_branch"] == "Feature/#5"
+    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert github.merged == []
+
+
+def test_merge_conflict_resolution_comment_queues_final_verdict_retry(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    resolution_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="merge_conflict_resolution", job="resolve-1", pr=77),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    result = service.handle_event(resolution_event)
+    service.wait_for_idle()
+
+    verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
+    assert result["stage"] == "final_verdict"
+    assert verdict_jobs
+    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+
+
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     github.open_issues["acme/demo"] = [
