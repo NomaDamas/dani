@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, TypedDict
 
+from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.models import JobRecord, SessionRecord
 from dani.signatures import build_signature, parse_signature
 
@@ -46,6 +47,14 @@ class FakeGitHubCLI:
                 return comment, parsed
         return None
 
+    def find_comments_by_signature(
+        self, repo_full_name: str, number: int, *, kind: str, signature_fragment: str
+    ) -> list[dict[str, Any]]:
+        comments = (
+            self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
+        )
+        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         self.merged.append((repo_full_name, pr_number))
 
@@ -65,10 +74,19 @@ class LaunchRecord(TypedDict):
     prompt: str
 
 
+class ResumeRecord(TypedDict):
+    repo_path: str
+    job: JobRecord
+    prompt: str
+    omx_session_id: str
+
+
 class FakeOmxRunner:
     def __init__(self, github: FakeGitHubCLI) -> None:
         self.github = github
         self.launches: list[LaunchRecord] = []
+        self.resumes: list[ResumeRecord] = []
+        self.closed_sessions: list[str] = []
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
@@ -85,11 +103,21 @@ class FakeOmxRunner:
             )
         elif job.stage == "implementation":
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
-            self.github.add_pull_request(
-                repo_full_name,
-                101,
-                build_signature(stage="implementation", job=job.id, issue=issue_number),
-            )
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            if pr_number:
+                signature_fields: dict[str, Any] = {"stage": "implementation", "job": job.id, "pr": pr_number}
+                if issue_number:
+                    signature_fields["issue"] = issue_number
+                self.github.add_pr_signature(
+                    repo_full_name,
+                    pr_number,
+                    build_signature(**signature_fields),
+                )
+            else:
+                signature_fields: dict[str, Any] = {"stage": "implementation", "job": job.id}
+                if issue_number:
+                    signature_fields["issue"] = issue_number
+                self.github.add_pull_request(repo_full_name, 101, build_signature(**signature_fields))
         elif job.stage == "review_round":
             pr_number = int((signature or {}).get("pr", job.pr_number or 0))
             self.github.add_pr_signature(
@@ -97,6 +125,8 @@ class FakeOmxRunner:
                 pr_number,
                 build_signature(stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1),
             )
+        elif job.stage == "dev_sync":
+            pass
         else:
             self.github.add_pr_signature(
                 repo_full_name,
@@ -108,8 +138,7 @@ class FakeOmxRunner:
         return SessionRecord(
             repo_full_name=repo_full_name,
             stage=job.stage,
-            tmux_session=f"tmux-{job.id}",
-            pane_id="%1",
+            runtime_handle=f"runtime-{job.id}",
             prompt_path=str(repo_path / "prompt.txt"),
             script_path=str(repo_path / "run.sh"),
             worktree_path=str(repo_path),
@@ -117,7 +146,73 @@ class FakeOmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
+            omx_session_id=f"omx-{job.id}",
         )
 
-    def wait(self, tmux_session: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        issue_number = job.issue_number or 0
+        self.github.add_issue_signature(
+            job.repo_full_name,
+            issue_number,
+            build_signature(stage="issue_followup", job=job.id, issue=issue_number),
+        )
+        self.resumes.append({
+            "repo_path": str(repo_path),
+            "job": job,
+            "prompt": prompt,
+            "omx_session_id": omx_session_id,
+        })
+        return SessionRecord(
+            repo_full_name=job.repo_full_name,
+            stage=job.stage,
+            runtime_handle=f"runtime-{job.id}",
+            prompt_path=str(repo_path / "prompt.txt"),
+            script_path=str(repo_path / "run.sh"),
+            worktree_path=str(repo_path),
+            job_id=job.id,
+            issue_number=job.issue_number,
+            pr_number=job.pr_number,
+            review_round=job.review_round,
+            omx_session_id=omx_session_id,
+        )
+
+    def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
         return None
+
+    def close_session(self, runtime_handle: str) -> None:
+        self.closed_sessions.append(runtime_handle)
+
+
+class FakeGitDevSyncer:
+    def __init__(self, *, conflict: bool = False, fail: bool = False) -> None:
+        self.conflict = conflict
+        self.fail = fail
+        self.sync_calls: list[tuple[str, str]] = []
+        self.verify_calls: list[DevSyncContext] = []
+        self.cleanup_calls: list[DevSyncContext] = []
+
+    def sync(self, repo: Any, job: JobRecord) -> DevSyncOutcome:
+        self.sync_calls.append((repo.full_name, str(job.metadata.get("main_sha", ""))))
+        if self.fail:
+            raise RuntimeError("dev-sync-failed")
+        if self.conflict:
+            context = DevSyncContext(
+                repo_path=Path(repo.local_path),
+                worktree_path=Path(repo.local_path) / f".fake-dev-sync-{job.id}",
+                source_branch=repo.main_branch,
+                target_branch=repo.dev_branch,
+                source_sha=str(job.metadata["main_sha"]),
+                temp_branch=f"dani/dev-sync/{job.id}",
+            )
+            context.worktree_path.mkdir(parents=True, exist_ok=True)
+            raise DevSyncConflictError(context)
+        return DevSyncOutcome(status="merged")
+
+    def build_commit_message(self, repo: Any, job: JobRecord) -> str:
+        return f"Sync {repo.main_branch} {job.metadata.get('main_sha', '')} into {repo.dev_branch}"
+
+    def verify_remote_sync(self, context: DevSyncContext) -> None:
+        self.verify_calls.append(context)
+
+    def cleanup(self, context: DevSyncContext) -> None:
+        self.cleanup_calls.append(context)

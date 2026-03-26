@@ -195,6 +195,7 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 .omx/
+.dani/
 
 # PyPI configuration file
 .pypirc

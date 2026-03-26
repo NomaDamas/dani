@@ -6,6 +6,7 @@ from typing import cast
 
 from fastapi.testclient import TestClient
 
+from dani.git_sync import DevSyncOutcome
 from dani.github import GitHubCLI
 from dani.models import DaniConfig
 from dani.omx_runner import OmxRunner
@@ -50,3 +51,44 @@ def test_github_webhook_endpoint_accepts_valid_signature(tmp_path: Path) -> None
 
     assert response.status_code == 200
     assert response.json()["status"] == "queued"
+
+
+def test_github_webhook_endpoint_queues_dev_sync_on_main_push(tmp_path: Path) -> None:
+    class FakeSyncer:
+        def sync(self, repo: object, job: object) -> DevSyncOutcome:
+            return DevSyncOutcome(status="merged")
+
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    github = FakeGitHubCLI()
+    omx_runner = FakeOmxRunner(github)
+    service = DaniService(
+        config,
+        storage=JsonStorage(config),
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(OmxRunner, omx_runner),
+        dev_syncer=FakeSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+    client = TestClient(create_app(service))
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "abc123",
+        "deleted": False,
+        "repository": {"full_name": "acme/demo"},
+        "sender": {"login": "human"},
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    response = client.post(
+        "/webhook",
+        content=body,
+        headers={
+            "x-github-event": "push",
+            "x-hub-signature-256": _signature(TEST_SECRET, body),
+        },
+    )
+
+    service.wait_for_idle()
+
+    assert response.status_code == 200
+    assert response.json()["stage"] == "dev_sync"

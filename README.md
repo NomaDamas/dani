@@ -7,7 +7,7 @@ Simple GitHub webhook -> OMX automation loop.
 - FastAPI webhook server
 - Registered repos only
 - Repo-serial / cross-repo parallel job handling
-- `omx --madmax` tmux launches
+- non-interactive `omx exec` / `omx exec resume` launches
 - Separate prompt templates in `dani/prompts.py`
 - Workflows for:
   - issue request report
@@ -19,11 +19,13 @@ Simple GitHub webhook -> OMX automation loop.
 Required local tools:
 - `git`
 - `omx`
-- `tmux`
 
 Required environment variables:
 - `DANI_WEBHOOK_SECRET`
 - `DANI_GITHUB_TOKEN` (preferred) or `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT`
+
+## Codex/OMX trust prerequisite
+Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx exec 'hello'` or `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
 
 ## CLI
 ```bash
@@ -34,7 +36,7 @@ dani show-state
 ```
 
 ## Persistence
-State is stored under `.dani/` by default:
+State is stored under `~/.dani/` by default:
 - `registry.json`
 - `jobs.json`
 - `sessions.json`
@@ -42,11 +44,6 @@ State is stored under `.dani/` by default:
 - `runs/` for generated OMX prompt/script artifacts
 
 
-## GitHub helper for agents
-Agents should use the bundled PyGithub helper instead of `gh` subprocess calls:
-
-```bash
-python /absolute/path/to/dani/github_helper.py issue-comment --repo owner/name --issue 123 --body-file comment.md
-python /absolute/path/to/dani/github_helper.py pr-comment --repo owner/name --pr 456 --body-file review.md
-python /absolute/path/to/dani/github_helper.py ensure-pr --repo owner/name --head feature/#123 --base dev --title "Feature/#123" --body-file pr-body.md
-```
+## GitHub surfaces
+- OMX sessions should use `gh` for issue comments, PR comments, and PR creation/update.
+- `dani/github.py` and `dani/github_helper.py` remain PyGithub-backed internal surfaces for dani runtime logic.
