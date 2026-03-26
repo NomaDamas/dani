@@ -51,6 +51,7 @@ class GitDevSyncer:
                 "--no-commit",
                 source_sha,
                 check=False,
+                env=self._automation_git_env(),
             )
             if merge_result.returncode == 0:
                 if self._has_pending_merge(context.worktree_path):
@@ -121,13 +122,13 @@ class GitDevSyncer:
     def _commit_merge(self, context: DevSyncContext, commit_message: str) -> None:
         commit_message_path = context.worktree_path / ".dani-dev-sync-commit-message.txt"
         commit_message_path.write_text(commit_message, encoding="utf-8")
-        env = os.environ | {
-            "GIT_AUTHOR_NAME": "dani",
-            "GIT_AUTHOR_EMAIL": "dani@example.com",
-            "GIT_COMMITTER_NAME": "dani",
-            "GIT_COMMITTER_EMAIL": "dani@example.com",
-        }
-        self._run_git(context.worktree_path, "commit", "--file", str(commit_message_path), env=env)
+        self._run_git(
+            context.worktree_path,
+            "commit",
+            "--file",
+            str(commit_message_path),
+            env=self._automation_git_env(),
+        )
 
     def _push(self, context: DevSyncContext) -> None:
         self._run_git(context.worktree_path, "push", "origin", f"HEAD:refs/heads/{context.target_branch}")
@@ -156,6 +157,14 @@ class GitDevSyncer:
 
     def _raise_runtime_error(self, message: str) -> NoReturn:
         raise RuntimeError(message)
+
+    def _automation_git_env(self) -> dict[str, str]:
+        return os.environ | {
+            "GIT_AUTHOR_NAME": "dani",
+            "GIT_AUTHOR_EMAIL": "dani@example.com",
+            "GIT_COMMITTER_NAME": "dani",
+            "GIT_COMMITTER_EMAIL": "dani@example.com",
+        }
 
     def _run_git(
         self,

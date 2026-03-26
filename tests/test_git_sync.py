@@ -88,3 +88,44 @@ def test_git_dev_syncer_raises_conflict_error_when_merge_conflicts(tmp_path: Pat
     conflict_files = _git(exc_info.value.context.worktree_path, "diff", "--name-only", "--diff-filter=U").stdout
     assert "app.txt" in conflict_files
     syncer.cleanup(exc_info.value.context)
+
+
+def test_git_dev_syncer_sets_automation_identity_for_merge_and_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_path, _origin = _init_repo(tmp_path)
+    (repo_path / "app.txt").write_text("base\nmain update\n", encoding="utf-8")
+    _git(repo_path, "add", "app.txt")
+    _git(repo_path, "commit", "-m", "main update")
+    main_sha = _git(repo_path, "rev-parse", "HEAD").stdout.strip()
+    _git(repo_path, "push", "origin", "main")
+
+    syncer = GitDevSyncer(tmp_path / "runs")
+    repo = RepoConfig(full_name="acme/demo", local_path=str(repo_path))
+    job = JobRecord(repo_full_name=repo.full_name, stage="dev_sync", metadata={"main_sha": main_sha})
+
+    recorded_envs: dict[str, dict[str, str] | None] = {}
+    original_run_git = syncer._run_git
+
+    def record_run_git(
+        path: Path,
+        *args: str,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        if args and args[0] in {"merge", "commit"}:
+            recorded_envs[args[0]] = env
+        return original_run_git(path, *args, check=check, env=env)
+
+    monkeypatch.setattr(syncer, "_run_git", record_run_git)
+
+    outcome = syncer.sync(repo, job)
+
+    assert outcome.status == "merged"
+    for command in ("merge", "commit"):
+        env = recorded_envs[command]
+        assert env is not None
+        assert env["GIT_AUTHOR_NAME"] == "dani"
+        assert env["GIT_AUTHOR_EMAIL"] == "dani@example.com"
+        assert env["GIT_COMMITTER_NAME"] == "dani"
+        assert env["GIT_COMMITTER_EMAIL"] == "dani@example.com"
