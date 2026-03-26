@@ -186,8 +186,13 @@ def test_get_pull_request_returns_raw_pull_request_payload(fake_repo: FakeRepo) 
     assert pull_request["base"]["ref"] == "dev"
 
 
-def test_merge_pull_request_raises_merge_conflict_error_for_conflicts(fake_repo: FakeRepo) -> None:
-    fake_repo.pulls[7].merge_exception = GithubException(409, {"message": "Merge conflict"}, {})
+@pytest.mark.parametrize("status", [405, 409])
+def test_merge_pull_request_raises_merge_conflict_error_for_conflicts(fake_repo: FakeRepo, status: int) -> None:
+    fake_repo.pulls[7].merge_exception = GithubException(
+        status,
+        {"message": "Base branch was modified. Review and try the merge again."},
+        {},
+    )
     github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
 
     with pytest.raises(MergeConflictError):

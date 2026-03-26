@@ -46,7 +46,7 @@ class JobRecord:
 class SessionRecord:
     repo_full_name: str
     stage: str
-    tmux_session: str
+    runtime_handle: str
     prompt_path: str
     script_path: str
     worktree_path: str
@@ -54,9 +54,13 @@ class SessionRecord:
     issue_number: int | None = None
     pr_number: int | None = None
     review_round: int | None = None
+    omx_session_id: str | None = None
+    stdout_path: str | None = None
+    stderr_path: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
-    pane_id: str | None = None
     status: str = "launched"
+    ended_at: str | None = None
+    termination_reason: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -76,6 +80,8 @@ class NormalizedEvent:
     title: str | None = None
     base_branch: str | None = None
     head_branch: str | None = None
+    ref: str | None = None
+    commit_sha: str | None = None
     is_pull_request: bool = False
 
 
@@ -102,6 +108,10 @@ class DaniConfig:
     @property
     def events_path(self) -> Path:
         return self.data_dir / "events.jsonl"
+
+    @property
+    def processed_events_path(self) -> Path:
+        return self.data_dir / "processed-events.json"
 
     @property
     def run_dir(self) -> Path:

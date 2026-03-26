@@ -15,17 +15,42 @@ Task: review GitHub issue #$issue_number titled "$issue_title".
 Issue body:
 $issue_body
 
-Write a GitHub issue comment that includes:
-1. Why this issue is needed
-2. Why this issue may not be needed
-3. A concise implementation plan
-4. Agent Signature
+Write one GitHub issue comment.
+Checklist:
+- [ ] AI-understood issue summary
+- [ ] Why this issue is needed
+- [ ] Why this issue may not be needed
+- [ ] Expected Outcome
+- [ ] Concise implementation plan
+- [ ] Agent Signature
 
 Use this exact signature somewhere in the comment:
 $signature
 
-Post it with the bundled PyGithub helper (write the comment to a file first, then send it):
-$github_helper issue-comment --repo $repo --issue $issue_number --body-file <comment-file.md>
+Post it with gh (write the comment to a file first, then send it):
+gh issue comment $issue_number --repo $repo --body-file <comment-file.md>
+
+After posting the comment, exit.
+        """.strip()
+    ),
+    "issue_followup": Template(
+        """
+You are resuming the existing discussion for GitHub issue #$issue_number in $repo.
+Local path: $local_path
+Issue title: $issue_title
+
+Original issue body:
+$issue_body
+
+New user follow-up comment:
+$comment_body
+
+Continue the existing issue discussion instead of restarting the analysis from scratch.
+Write exactly one GitHub issue comment that addresses the new follow-up and includes this exact signature:
+$signature
+
+Post it with gh (write the comment to a file first, then send it):
+gh issue comment $issue_number --repo $repo --body-file <followup-comment.md>
 
 After posting the comment, exit.
         """.strip()
@@ -42,6 +67,8 @@ $issue_body
 Discussion context:
 $discussion
 
+$pr_context
+
 Implement the approved change.
 Requirements:
 - Use $$ralph to finish the work
@@ -49,10 +76,13 @@ Requirements:
 - Make all tests pass
 - Actually run the code and verify behavior
 - Create/update branch named like feature/#$issue_number
-- Open or update a PR targeting $dev_branch with the bundled PyGithub helper:
-  $github_helper ensure-pr --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
-- Put this signature in the PR body:
-$signature
+- Commit and push your changes to feature/#$issue_number
+- Ensure there is a PR targeting $dev_branch for feature/#$issue_number
+  - If no PR exists, create it with:
+    gh pr create --repo $repo --head feature/#$issue_number --base $dev_branch --title "Feature/#$issue_number" --body-file <pr-body.md>
+  - If a PR already exists, push new commits to the same branch so the PR updates automatically
+  - Update the PR body only if needed to keep the description/signature accurate
+$signature_instructions
 
 After creating or updating the PR, exit.
         """.strip()
@@ -68,12 +98,17 @@ $pr_body
 Recent discussion:
 $discussion
 
-Use the code locally, review the changes, and leave exactly one GitHub PR comment summarizing the review findings.
-Include this exact signature in the comment:
-$signature
+Use the code locally and run $$code-review before writing the review comment.
+Do real verification, not only static inspection.
+Checklist:
+- [ ] Use $$code-review
+- [ ] Run the code or tests needed to validate behavior
+- [ ] Include Real Result from actual verification
+- [ ] Include concrete evidence appropriate for what you verified
+- [ ] Include this exact signature: $signature
 
-Post it with the bundled PyGithub helper:
-$github_helper pr-comment --repo $repo --pr $pr_number --body-file <review-comment.md>
+Post it with gh:
+gh pr comment $pr_number --repo $repo --body-file <review-comment.md>
 
 After posting the PR comment, exit.
         """.strip()
@@ -105,7 +140,7 @@ $signature
 - Do not merge the PR yourself; dani will rerun the final verdict after your comment
 
 Post it with the bundled PyGithub helper:
-$github_helper pr-comment --repo $repo --pr $pr_number --body-file <merge-conflict-comment.md>
+gh pr comment $pr_number --repo $repo --body-file <merge-conflict-comment.md>
 
 After posting the PR comment, exit.
         """.strip()
@@ -120,16 +155,45 @@ $pr_body
 Review history:
 $discussion
 
-Leave exactly one final GitHub PR comment with APPROVE or REJECT and a short reason.
-If you approve, include this exact signature in the comment:
-$approve_signature
-If you reject, include this exact signature in the comment:
-$reject_signature
+Leave exactly one final GitHub PR comment.
+Checklist:
+- [ ] Verdict: APPROVE or REJECT
+- [ ] Short reason
+- [ ] Real Result from actual verification
+- [ ] Include concrete evidence appropriate for what you verified
+- [ ] If APPROVE, include: $approve_signature
+- [ ] If REJECT, include: $reject_signature
 
-Post it with the bundled PyGithub helper:
-$github_helper pr-comment --repo $repo --pr $pr_number --body-file <final-verdict.md>
+Post it with gh:
+gh pr comment $pr_number --repo $repo --body-file <final-verdict.md>
 
 After posting the PR comment, exit.
+        """.strip()
+    ),
+    "dev_sync_conflict": Template(
+        """
+You are operating inside repository: $repo
+Local path: $local_path
+
+The worktree is already in a merge-conflict state.
+Goal: merge $main_branch commit $main_sha into $dev_branch and push directly to origin/$dev_branch.
+Temporary branch: $temp_branch
+
+Requirements:
+- Resolve every existing merge conflict in this worktree
+- Preserve intended behavior from both branches unless the codebase clearly indicates otherwise
+- Run the smallest relevant verification needed for the files you changed
+- Do not open a PR
+- Commit the resolved merge using this exact commit message:
+
+$commit_message
+
+- Push the resolved merge with:
+  git push origin HEAD:refs/heads/$dev_branch
+- Before exiting, make sure there are no unmerged files left:
+  git diff --name-only --diff-filter=U
+
+After the push succeeds, exit.
         """.strip()
     ),
 }
@@ -137,7 +201,7 @@ After posting the PR comment, exit.
 
 def render_prompt(template_name: str, context: dict[str, Any]) -> str:
     template = TEMPLATES[template_name]
-    context = {"github_helper": "", **context}
+    context = dict(context)
     if template_name != "final_verdict" and "signature" not in context:
         context = {
             **context,

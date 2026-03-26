@@ -12,7 +12,7 @@ from dani.server import create_app
 from dani.service import DaniService
 
 app = typer.Typer(help="Simple GitHub webhook -> OMX automation loop.")
-DEFAULT_DATA_DIR = Path(".dani")
+DEFAULT_DATA_DIR = Path.home() / ".dani"
 DATA_DIR_OPTION = typer.Option(DEFAULT_DATA_DIR, help="Directory for dani state files.")
 HOST_OPTION = typer.Option("127.0.0.1", help="Bind host.")
 PORT_OPTION = typer.Option(8787, help="Bind port.")

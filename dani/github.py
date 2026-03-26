@@ -91,6 +91,14 @@ class GitHubCLI:
                 return comment, parsed
         return None
 
+    def find_comments_by_signature(
+        self, repo_full_name: str, number: int, *, kind: str, signature_fragment: str
+    ) -> list[dict[str, Any]]:
+        comments = (
+            self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
+        )
+        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
         issue = self._repo(repo_full_name).get_issue(issue_number)
         return issue.create_comment(body).raw_data
@@ -122,6 +130,6 @@ class GitHubCLI:
         try:
             pull_request.merge(merge_method="merge", delete_branch=True)
         except GithubException as exc:
-            if exc.status == 409:
+            if exc.status in {405, 409}:
                 raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
             raise

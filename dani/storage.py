@@ -20,6 +20,7 @@ class JsonStorage:
         self._ensure_json_file(self.config.registry_path, {"repos": []})
         self._ensure_json_file(self.config.jobs_path, {"jobs": []})
         self._ensure_json_file(self.config.sessions_path, {"sessions": []})
+        self._ensure_json_file(self.config.processed_events_path, {"keys": []})
         if not self.config.events_path.exists():
             self.config.events_path.write_text("", encoding="utf-8")
 
@@ -137,9 +138,46 @@ class JsonStorage:
             payload = self._read_json(self.config.sessions_path)
             return [SessionRecord(**item) for item in payload["sessions"]]
 
+    def find_latest_session(
+        self,
+        *,
+        repo_full_name: str,
+        stage: str | None = None,
+        issue_number: int | None = None,
+        pr_number: int | None = None,
+        require_omx_session_id: bool = False,
+    ) -> SessionRecord | None:
+        for session in reversed(self.list_sessions()):
+            if session.repo_full_name != repo_full_name:
+                continue
+            if stage is not None and session.stage != stage:
+                continue
+            if issue_number is not None and session.issue_number != issue_number:
+                continue
+            if pr_number is not None and session.pr_number != pr_number:
+                continue
+            if require_omx_session_id and not session.omx_session_id:
+                continue
+            return session
+        return None
+
     def append_event(self, event: dict[str, Any]) -> None:
         with self._lock, self.config.events_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def record_processed_event(self, key: str) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.processed_events_path)
+            if key in payload["keys"]:
+                return False
+            payload["keys"].append(key)
+            self._write_json(self.config.processed_events_path, payload)
+            return True
+
+    def has_processed_event(self, key: str) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.processed_events_path)
+            return key in payload["keys"]
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -147,5 +185,6 @@ class JsonStorage:
                 "registry": self._read_json(self.config.registry_path),
                 "jobs": self._read_json(self.config.jobs_path),
                 "sessions": self._read_json(self.config.sessions_path),
+                "processed_events": self._read_json(self.config.processed_events_path),
                 "events_path": str(self.config.events_path),
             }
