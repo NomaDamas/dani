@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
+from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
 from dani.signatures import build_signature, parse_signature
 
@@ -16,6 +17,7 @@ class FakeGitHubCLI:
         self.prs: dict[str, list[dict[str, Any]]] = {}
         self.open_issues: dict[str, list[dict[str, Any]]] = {}
         self.merged: list[tuple[str, int]] = []
+        self.merge_conflicts: set[tuple[str, int]] = set()
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -34,6 +36,18 @@ class FakeGitHubCLI:
             if signature_fragment in (pull_request.get("body") or ""):
                 return pull_request
         return None
+
+    def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
+        for pull_request in self.list_pull_requests(repo_full_name):
+            if pull_request.get("number") == pr_number:
+                return dict(pull_request)
+        return {
+            "number": pr_number,
+            "title": f"PR #{pr_number}",
+            "body": "",
+            "head": {"ref": f"Feature/#{pr_number}"},
+            "base": {"ref": "dev"},
+        }
 
     def latest_signature_comment(
         self, repo_full_name: str, number: int, *, kind: str
@@ -56,6 +70,8 @@ class FakeGitHubCLI:
         return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        if (repo_full_name, pr_number) in self.merge_conflicts:
+            raise MergeConflictError(repo_full_name, pr_number, status=409, message="merge conflict with base branch")
         self.merged.append((repo_full_name, pr_number))
 
     def add_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> None:
@@ -64,8 +80,23 @@ class FakeGitHubCLI:
     def add_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> None:
         self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append({"body": signature})
 
-    def add_pull_request(self, repo_full_name: str, pr_number: int, signature: str) -> None:
-        self.prs.setdefault(repo_full_name, []).append({"number": pr_number, "body": signature})
+    def add_pull_request(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        body: str,
+        *,
+        title: str | None = None,
+        head_branch: str | None = None,
+        base_branch: str = "dev",
+    ) -> None:
+        self.prs.setdefault(repo_full_name, []).append({
+            "number": pr_number,
+            "title": title or f"Feature/#{pr_number}",
+            "body": body,
+            "head": {"ref": head_branch or f"Feature/#{pr_number}"},
+            "base": {"ref": base_branch},
+        })
 
 
 class LaunchRecord(TypedDict):
@@ -124,6 +155,13 @@ class FakeOmxRunner:
                 repo_full_name,
                 pr_number,
                 build_signature(stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1),
+            )
+        elif job.stage == "merge_conflict_resolution":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             )
         elif job.stage == "dev_sync":
             pass

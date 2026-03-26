@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
-from dani.github import GitHubCLI
+from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
@@ -110,74 +110,130 @@ class DaniService:
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
         if stage == "review_round":
-            event_key = self._agent_event_key(signature, default_pr=event.number if event.is_pull_request else None)
-            if not self.storage.record_processed_event(event_key):
-                return {"status": "ignored", "reason": "duplicate_agent_event"}
-            review_round = int(signature["round"])
-            pr_number = int(signature["pr"])
-            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
-            repo = self.storage.get_repo(event.repo_full_name)
-            if repo is None:
-                return {"status": "ignored", "reason": "missing_repo"}
-            pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
-            next_job = self._enqueue_job(
-                repo,
-                stage="implementation",
-                issue_number=issue_number,
-                pr_number=pr_number,
-                review_round=review_round,
-                metadata={
-                    **pr_metadata,
-                    "title": (pr_metadata.get("title") or event.title or ""),
-                    "review_comment_body": event.body or "",
-                    "triggering_review_round": review_round,
-                },
-            )
-            return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
+            return self._handle_review_round_agent_event(event, signature)
 
         if stage == "implementation" and event.kind == "pull_request_comment":
-            pr_number = int(signature.get("pr") or event.number)
-            event_key = self._agent_event_key(signature, default_pr=pr_number)
-            if not self.storage.record_processed_event(event_key):
-                return {"status": "ignored", "reason": "duplicate_agent_event"}
-            repo = self.storage.get_repo(event.repo_full_name)
-            if repo is None:
-                return {"status": "ignored", "reason": "missing_repo"}
-            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
-            latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
-            pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
-            if latest_review_round >= self.config.review_rounds:
-                verdict_job = self._enqueue_job(
-                    repo,
-                    stage="final_verdict",
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    metadata={
-                        **pr_metadata,
-                        "title": (pr_metadata.get("title") or event.title or ""),
-                    },
-                )
-                return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+            return self._handle_implementation_agent_event(event, signature)
 
-            next_round = max(latest_review_round + 1, 1)
-            review_job = self._enqueue_job(
+        if stage == "merge_conflict_resolution":
+            return self._handle_merge_conflict_resolution_agent_event(event, signature)
+
+        if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
+            return self._handle_final_verdict_agent_event(event, signature)
+
+        return {"status": "updated", "stage": stage}
+
+    def _handle_review_round_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        event_key = self._agent_event_key(signature, default_pr=event.number if event.is_pull_request else None)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        review_round = int(signature["round"])
+        pr_number = int(signature["pr"])
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        next_job = self._enqueue_job(
+            repo,
+            stage="implementation",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            review_round=review_round,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+                "review_comment_body": event.body or "",
+                "triggering_review_round": review_round,
+            },
+        )
+        return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
+
+    def _handle_implementation_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        pr_number = int(signature.get("pr") or event.number)
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        if latest_review_round >= self.config.review_rounds:
+            verdict_job = self._enqueue_job(
                 repo,
-                stage="review_round",
+                stage="final_verdict",
                 issue_number=issue_number,
                 pr_number=pr_number,
-                review_round=next_round,
                 metadata={
                     **pr_metadata,
                     "title": (pr_metadata.get("title") or event.title or ""),
                 },
             )
-            return {"status": "queued", "job_id": review_job.id, "stage": review_job.stage}
+            return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
 
-        if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
-            self.github.merge_pull_request(event.repo_full_name, int(signature["pr"]))
-            return {"status": "merged", "pr_number": int(signature["pr"])}
+        next_round = max(latest_review_round + 1, 1)
+        review_job = self._enqueue_job(
+            repo,
+            stage="review_round",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            review_round=next_round,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+            },
+        )
+        return {"status": "queued", "job_id": review_job.id, "stage": review_job.stage}
 
-        return {"status": "updated", "stage": stage}
+    def _handle_merge_conflict_resolution_agent_event(
+        self, event: NormalizedEvent, signature: dict[str, str]
+    ) -> dict[str, Any]:
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        pr_number = int(signature["pr"])
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            issue_number = self._extract_issue_number(pr_metadata.get("body"))
+        verdict_job = self._enqueue_job(
+            repo,
+            stage="final_verdict",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+            },
+        )
+        return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+
+    def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        pr_number = int(signature["pr"])
+        try:
+            self.github.merge_pull_request(event.repo_full_name, pr_number)
+        except MergeConflictError as exc:
+            repo = self.storage.get_repo(event.repo_full_name)
+            if repo is None:
+                return {"status": "ignored", "reason": "missing_repo"}
+            pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+            merge_conflict_job = self._enqueue_job(
+                repo,
+                stage="merge_conflict_resolution",
+                issue_number=self._extract_issue_number(pull_request.get("body")),
+                pr_number=pr_number,
+                metadata={
+                    "title": pull_request.get("title") or event.title or f"PR #{pr_number}",
+                    "body": pull_request.get("body") or "",
+                    "head_branch": self._branch_ref(pull_request, "head"),
+                    "base_branch": self._branch_ref(pull_request, "base"),
+                    "conflict_reason": str(exc),
+                },
+            )
+            return {"status": "queued", "job_id": merge_conflict_job.id, "stage": merge_conflict_job.stage}
+        return {"status": "merged", "pr_number": pr_number}
 
     def _enqueue_job(
         self,
@@ -316,6 +372,9 @@ class DaniService:
         if job.stage == "review_round":
             return self._build_review_round_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
+        if job.stage == "merge_conflict_resolution":
+            return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+
         return self._build_final_verdict_prompt(job, issue_number, pr_number, pr_title, pr_body)
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -330,6 +389,9 @@ class DaniService:
             return
         if job.stage == "review_round":
             self._verify_review_round_side_effect(repo, job)
+            return
+        if job.stage == "merge_conflict_resolution":
+            self._verify_merge_conflict_resolution_side_effect(repo, job)
             return
         if job.stage == "final_verdict":
             self._verify_final_verdict_side_effect(repo, job)
@@ -473,6 +535,31 @@ class DaniService:
             },
         )
 
+    def _build_merge_conflict_resolution_prompt(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        issue_number: int,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+    ) -> str:
+        return render_prompt(
+            "merge_conflict_resolution",
+            {
+                "repo": repo.full_name,
+                "local_path": repo.local_path,
+                "issue_number": issue_number,
+                "pr_number": pr_number,
+                "pr_title": pr_title,
+                "pr_body": pr_body,
+                "head_branch": job.metadata.get("head_branch", ""),
+                "base_branch": job.metadata.get("base_branch", repo.dev_branch),
+                "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
+                "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
+            },
+        )
+
     def _build_final_verdict_prompt(
         self,
         job: JobRecord,
@@ -541,6 +628,11 @@ class DaniService:
         if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
             raise RuntimeError("review-comment-missing")
 
+    def _verify_merge_conflict_resolution_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        signature = build_signature(stage="merge_conflict_resolution", job=job.id, pr=int(job.pr_number or 0))
+        if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
+            raise RuntimeError("merge-conflict-comment-missing")
+
     def _verify_final_verdict_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         approve_signature = build_signature(
             stage="final_verdict",
@@ -575,6 +667,14 @@ class DaniService:
         if match is None:
             return None
         return int(match.group("number"))
+
+    def _branch_ref(self, payload: dict[str, Any], key: str) -> str | None:
+        ref_payload = payload.get(key)
+        if isinstance(ref_payload, dict):
+            ref = ref_payload.get("ref")
+            if isinstance(ref, str) and ref:
+                return ref
+        return None
 
     def _queue_issue_request(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         job = self._enqueue_job(

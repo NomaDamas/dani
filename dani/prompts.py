@@ -113,6 +113,38 @@ gh pr comment $pr_number --repo $repo --body-file <review-comment.md>
 After posting the PR comment, exit.
         """.strip()
     ),
+    "merge_conflict_resolution": Template(
+        """
+You are resolving a merge conflict for PR #$pr_number in $repo.
+Local path: $local_path
+PR title: $pr_title
+PR body:
+$pr_body
+
+Related issue: #$issue_number
+Head branch: $head_branch
+Base branch: $base_branch
+Conflict reason:
+$conflict_reason
+
+Resolve the merge conflict so the PR can be reviewed again safely.
+Requirements:
+- Fetch the latest remote branches
+- Check out the PR head branch locally
+- Update the head branch from $base_branch and resolve every merge conflict
+- Re-run the relevant tests/verification after the merge update
+- Push the resolved branch back to the remote
+- Leave exactly one GitHub PR comment summarizing what changed and what you verified
+- Include this exact signature in the comment:
+$signature
+- Do not merge the PR yourself; dani will rerun the final verdict after your comment
+
+Post it with the bundled PyGithub helper:
+gh pr comment $pr_number --repo $repo --body-file <merge-conflict-comment.md>
+
+After posting the PR comment, exit.
+        """.strip()
+    ),
     "final_verdict": Template(
         """
 You are deciding the final verdict for PR #$pr_number in $repo.
