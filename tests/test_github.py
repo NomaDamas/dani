@@ -31,6 +31,12 @@ class FakeBranchRef:
         self.ref = ref
 
 
+class FakeMergeStatus:
+    def __init__(self, *, merged: bool = True, message: str = "merged") -> None:
+        self.merged = merged
+        self.message = message
+
+
 class FakePullRequest:
     def __init__(
         self,
@@ -51,6 +57,9 @@ class FakePullRequest:
         self.edits: list[dict[str, str]] = []
         self.merged = False
         self.merge_exception: Exception | None = None
+        self.merge_status = FakeMergeStatus()
+        self.delete_branch_exception: Exception | None = None
+        self.delete_branch_calls = 0
         self._refresh_raw_data()
 
     def _refresh_raw_data(self) -> None:
@@ -76,12 +85,18 @@ class FakePullRequest:
         self.edits.append({"title": title, "body": body, "base": base})
         self._refresh_raw_data()
 
-    def merge(self, *, merge_method: str, delete_branch: bool) -> None:
+    def merge(self, *, merge_method: str, delete_branch: bool) -> FakeMergeStatus:
         assert merge_method == "merge"
-        assert delete_branch is True
+        assert delete_branch is False
         if self.merge_exception is not None:
             raise self.merge_exception
-        self.merged = True
+        self.merged = self.merge_status.merged
+        return self.merge_status
+
+    def delete_branch(self) -> None:
+        self.delete_branch_calls += 1
+        if self.delete_branch_exception is not None:
+            raise self.delete_branch_exception
 
 
 class FakeRepo:
@@ -186,8 +201,10 @@ def test_get_pull_request_returns_raw_pull_request_payload(fake_repo: FakeRepo) 
     assert pull_request["base"]["ref"] == "dev"
 
 
-@pytest.mark.parametrize("status", [405, 409])
-def test_merge_pull_request_raises_merge_conflict_error_for_conflicts(fake_repo: FakeRepo, status: int) -> None:
+@pytest.mark.parametrize("status", [405, 409, 422])
+def test_merge_pull_request_raises_merge_conflict_error_for_merge_api_failures(
+    fake_repo: FakeRepo, status: int
+) -> None:
     fake_repo.pulls[7].merge_exception = GithubException(
         status,
         {"message": "Base branch was modified. Review and try the merge again."},
@@ -195,5 +212,27 @@ def test_merge_pull_request_raises_merge_conflict_error_for_conflicts(fake_repo:
     )
     github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
 
-    with pytest.raises(MergeConflictError):
+    with pytest.raises(MergeConflictError) as exc_info:
         github.merge_pull_request("acme/demo", 7)
+
+    assert exc_info.value.status == status
+
+
+def test_merge_pull_request_raises_merge_conflict_error_when_merge_status_is_false(fake_repo: FakeRepo) -> None:
+    fake_repo.pulls[7].merge_status = FakeMergeStatus(merged=False, message="Pull Request is not mergeable")
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    with pytest.raises(MergeConflictError, match="Pull Request is not mergeable"):
+        github.merge_pull_request("acme/demo", 7)
+
+    assert fake_repo.pulls[7].delete_branch_calls == 0
+
+
+def test_merge_pull_request_allows_branch_delete_failure_after_success(fake_repo: FakeRepo) -> None:
+    fake_repo.pulls[7].delete_branch_exception = RuntimeError("branch delete failed")
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    github.merge_pull_request("acme/demo", 7)
+
+    assert fake_repo.pulls[7].merged is True
+    assert fake_repo.pulls[7].delete_branch_calls == 1
