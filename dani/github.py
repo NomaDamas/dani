@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
@@ -10,6 +11,7 @@ from github.GithubException import GithubException
 from dani.signatures import parse_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
+LOGGER = logging.getLogger(__name__)
 
 
 class MergeConflictError(RuntimeError):
@@ -128,8 +130,16 @@ class GitHubCLI:
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         try:
-            pull_request.merge(merge_method="merge", delete_branch=True)
+            merge_status = pull_request.merge(merge_method="merge", delete_branch=False)
         except GithubException as exc:
-            if exc.status in {405, 409}:
-                raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
-            raise
+            raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+        if not merge_status.merged:
+            raise MergeConflictError(repo_full_name, pr_number, message=merge_status.message)
+        try:
+            pull_request.delete_branch()
+        except Exception:
+            LOGGER.warning(
+                "Pull request merged but failed to delete head branch",
+                extra={"repo_full_name": repo_full_name, "pr_number": pr_number},
+                exc_info=True,
+            )
