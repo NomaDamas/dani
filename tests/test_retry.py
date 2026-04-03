@@ -115,7 +115,7 @@ def test_non_transient_error_not_retried(mock_sleep: object, tmp_path: Path) -> 
 
     original_launch = omx_runner.launch
 
-    def failing_launch(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def failing_launch(*args, **kwargs):
         result = original_launch(*args, **kwargs)
         # Remove the side effect so verify fails with a non-transient error
         github.issue_comment_map.clear()

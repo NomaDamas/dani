@@ -169,7 +169,7 @@ class FakeOmxRunner:
             else:
                 fields = {"stage": "implementation", "job": job.id}
                 if issue_number:
-                    fields["issue"] = issue_number
+                    fields["issue"] = str(issue_number)
                 self.github.add_pull_request(repo_full_name, 101, build_signature(**fields))
         elif job.stage == "review_round":
             pr_number = int((signature or {}).get("pr", job.pr_number or 0))
