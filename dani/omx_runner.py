@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 from uuid import uuid4
 
+from dani.errors import check_transient_capacity_error
 from dani.models import JobRecord, SessionRecord
 
 
@@ -134,6 +135,15 @@ class OmxRunner:
         except subprocess.TimeoutExpired as exc:
             msg = f"omx exec process did not exit before timeout: {runtime_handle}"
             raise TimeoutError(msg) from exc
+
+        self._check_stderr_for_transient_error(runtime_handle)
+
+    def _check_stderr_for_transient_error(self, runtime_handle: str) -> None:
+        stderr_path = self.run_dir / runtime_handle / "stderr.log"
+        if not stderr_path.exists():
+            return
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        check_transient_capacity_error(stderr_text)
 
     def close_session(self, runtime_handle: str) -> None:
         with self._lock:

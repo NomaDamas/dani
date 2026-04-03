@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import contextlib
+import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from dani.errors import TransientCapacityError
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
@@ -14,6 +18,10 @@ from dani.signatures import build_signature, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
+
+RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
+
+logger = logging.getLogger(__name__)
 
 
 class DaniService:
@@ -267,23 +275,117 @@ class DaniService:
             self._run_dev_sync_job(repo, job)
             return
 
-        session = None
-        try:
-            prompt = self._build_prompt(repo, job)
-            if job.stage == "issue_followup":
-                session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
+        retry_history: list[dict[str, str]] = list(job.metadata.get("retry_history", []))
+        max_attempts = len(RETRY_BACKOFF_SECONDS) + 1
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._run_job_attempt(repo, job)
+            except TransientCapacityError as exc:
+                if self._handle_transient_failure(repo, job, exc, attempt, max_attempts, retry_history):
+                    return
+            except Exception as exc:
+                self._handle_job_failure(job, exc, attempt, retry_history)
+                return
             else:
-                session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
-            self.storage.create_session(session)
-            self.storage.update_job(job.id, status="launched", session_id=session.id)
+                self.storage.update_job(
+                    job.id,
+                    status="completed",
+                    metadata={**job.metadata, "retry_attempts": attempt - 1, "retry_history": retry_history},
+                )
+                return
+
+    def _run_job_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
+        prompt = self._build_prompt(repo, job)
+        if job.stage == "issue_followup":
+            session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
+        else:
+            session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
+        self.storage.create_session(session)
+        self.storage.update_job(job.id, status="launched", session_id=session.id)
+        try:
             self.omx_runner.wait(session.runtime_handle)
             self._verify_side_effect(repo, job)
-            self._finalize_session(session, status="completed", termination_reason="completed")
-            self.storage.update_job(job.id, status="completed")
-        except Exception as exc:
-            if session is not None:
-                self._finalize_session(session, status="failed", termination_reason=type(exc).__name__)
-            self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": str(exc)})
+        except Exception:
+            self._finalize_session(session, status="failed", termination_reason="failed")
+            raise
+        self._finalize_session(session, status="completed", termination_reason="completed")
+
+    def _handle_transient_failure(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        exc: TransientCapacityError,
+        attempt: int,
+        max_attempts: int,
+        retry_history: list[dict[str, str]],
+    ) -> bool:
+        """Handle a transient capacity error. Return True if the job is terminal (done or exhausted)."""
+        # If the side effect was already posted before the capacity error,
+        # treat the job as completed to avoid duplicate GitHub comments/PRs.
+        side_effect_exists = False
+        with contextlib.suppress(Exception):
+            self._verify_side_effect(repo, job)
+            side_effect_exists = True
+        if side_effect_exists:
+            self.storage.update_job(
+                job.id,
+                status="completed",
+                metadata={
+                    **job.metadata,
+                    "retry_attempts": attempt - 1,
+                    "retry_history": retry_history,
+                    "note": "side_effect_already_posted",
+                },
+            )
+            return True
+        retry_history.append({
+            "attempt": str(attempt),
+            "reason": "transient_capacity",
+            "pattern": exc.pattern,
+            "at": utc_now(),
+        })
+        if attempt >= max_attempts:
+            logger.warning("Job %s exhausted all %d retry attempts", job.id, max_attempts)
+            self.storage.update_job(
+                job.id,
+                status="failed",
+                metadata={
+                    **job.metadata,
+                    "error": f"retry_exhausted: {exc}",
+                    "retry_exhausted": True,
+                    "retry_attempts": attempt,
+                    "retry_history": retry_history,
+                },
+            )
+            return True
+        backoff = RETRY_BACKOFF_SECONDS[attempt - 1]
+        logger.info("Job %s attempt %d hit transient capacity error, retrying in %ds", job.id, attempt, backoff)
+        self.storage.update_job(
+            job.id,
+            status="retrying",
+            metadata={**job.metadata, "retry_attempts": attempt, "retry_history": retry_history},
+        )
+        time.sleep(backoff)
+        return False
+
+    def _handle_job_failure(
+        self,
+        job: JobRecord,
+        exc: Exception,
+        attempt: int,
+        retry_history: list[dict[str, str]],
+    ) -> None:
+        self.storage.update_job(
+            job.id,
+            status="failed",
+            metadata={
+                **job.metadata,
+                "error": str(exc),
+                "retry_attempts": attempt - 1,
+                "retry_history": retry_history,
+            },
+        )
 
     def _run_dev_sync_job(self, repo: RepoConfig, job: JobRecord) -> None:
         session = None
