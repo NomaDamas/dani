@@ -50,8 +50,12 @@ class RepoQueueManager:
             job = repo_queue.get()
             try:
                 if self._try_execute_or_defer(repo_full_name, job):
-                    self._handler(job)
-                    self._after_job(repo_full_name, job)
+                    try:
+                        self._handler(job)
+                    except Exception:
+                        job.status = "failed"
+                    finally:
+                        self._after_job(repo_full_name, job)
             finally:
                 repo_queue.task_done()
 

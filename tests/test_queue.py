@@ -151,6 +151,30 @@ def test_failed_job_releases_lock() -> None:
     ]
 
 
+def test_handler_exception_releases_lock() -> None:
+    """If the handler raises an unhandled exception, the issue lock is still released."""
+    execution_order: list[tuple[int, str]] = []
+    lock = threading.Lock()
+
+    def handler(job: JobRecord) -> None:
+        with lock:
+            execution_order.append((job.issue_number, job.stage))  # type: ignore[arg-type]
+        if job.issue_number == 1:
+            msg = "unexpected storage failure"
+            raise RuntimeError(msg)
+
+    manager = RepoQueueManager(handler)
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=1))
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=2))
+    manager.join_all()
+
+    # Issue #2 must still run even though #1's handler raised
+    assert execution_order == [
+        (1, "implementation"),
+        (2, "implementation"),
+    ]
+
+
 def test_deferred_jobs_requeued_on_terminal() -> None:
     """When active issue reaches final_verdict, deferred jobs are re-enqueued.
 
