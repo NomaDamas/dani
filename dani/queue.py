@@ -9,6 +9,17 @@ from dani.models import JobRecord
 
 JobHandler = Callable[[JobRecord], Any]
 
+# Stages that touch git branches and require exclusive issue access.
+_ISSUE_LOCKED_STAGES = frozenset({
+    "implementation",
+    "review_round",
+    "final_verdict",
+    "merge_conflict_resolution",
+})
+
+# Stages that end an issue's lifecycle and release the lock.
+_TERMINAL_STAGES = frozenset({"final_verdict"})
+
 
 class RepoQueueManager:
     def __init__(self, handler: JobHandler) -> None:
@@ -16,6 +27,8 @@ class RepoQueueManager:
         self._queues: dict[str, queue.Queue[JobRecord]] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
+        self._active_issue: dict[str, int] = {}
+        self._deferred: dict[str, list[JobRecord]] = {}
 
     def submit(self, job: JobRecord) -> None:
         with self._lock:
@@ -36,9 +49,40 @@ class RepoQueueManager:
         while True:
             job = repo_queue.get()
             try:
-                self._handler(job)
+                if self._try_execute_or_defer(repo_full_name, job):
+                    self._handler(job)
+                    self._after_job(repo_full_name, job)
             finally:
                 repo_queue.task_done()
+
+    def _needs_issue_lock(self, job: JobRecord) -> bool:
+        return job.issue_number is not None and job.stage in _ISSUE_LOCKED_STAGES
+
+    def _try_execute_or_defer(self, repo: str, job: JobRecord) -> bool:
+        """Return True if the job should execute now, False if deferred."""
+        if not self._needs_issue_lock(job):
+            return True
+        with self._lock:
+            active = self._active_issue.get(repo)
+            issue = job.issue_number  # guaranteed non-None by _needs_issue_lock
+            if active is None or active == issue:
+                self._active_issue[repo] = issue  # type: ignore[assignment]
+                return True
+            self._deferred.setdefault(repo, []).append(job)
+            return False
+
+    def _after_job(self, repo: str, job: JobRecord) -> None:
+        if not self._needs_issue_lock(job):
+            return
+        if job.stage in _TERMINAL_STAGES or job.status == "failed":
+            self._flush_deferred(repo)
+
+    def _flush_deferred(self, repo: str) -> None:
+        with self._lock:
+            self._active_issue.pop(repo, None)
+            deferred = self._deferred.pop(repo, [])
+        for deferred_job in deferred:
+            self._queues[repo].put(deferred_job)
 
     def join_all(self) -> None:
         for repo_queue in self._queues.values():
