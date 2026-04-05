@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 from collections.abc import Callable
 from typing import Any
 
 from dani.models import JobRecord
+
+logger = logging.getLogger(__name__)
 
 JobHandler = Callable[[JobRecord], Any]
 
@@ -55,7 +58,11 @@ class RepoQueueManager:
                     except Exception:
                         job.status = "failed"
                     finally:
-                        self._after_job(repo_full_name, job)
+                        try:
+                            self._after_job(repo_full_name, job)
+                        except Exception:
+                            logger.exception("_after_job failed for job %s, force-releasing issue lock", job.id)
+                            self._force_release(repo_full_name)
             finally:
                 repo_queue.task_done()
 
@@ -88,6 +95,18 @@ class RepoQueueManager:
         for deferred_job in deferred:
             self._queues[repo].put(deferred_job)
 
+    def _force_release(self, repo: str) -> None:
+        """Emergency release: clear active issue and re-enqueue deferred jobs."""
+        with self._lock:
+            self._active_issue.pop(repo, None)
+            deferred = self._deferred.pop(repo, [])
+        for deferred_job in deferred:
+            self._queues[repo].put(deferred_job)
+
     def join_all(self) -> None:
         for repo_queue in self._queues.values():
             repo_queue.join()
+        with self._lock:
+            for repo, jobs in self._deferred.items():
+                if jobs:
+                    logger.warning("join_all: %d deferred jobs for %s were never flushed", len(jobs), repo)

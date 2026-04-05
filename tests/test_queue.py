@@ -1,5 +1,8 @@
+import logging
 import threading
 import time
+
+import pytest
 
 from dani.models import JobRecord
 from dani.queue import RepoQueueManager
@@ -209,3 +212,20 @@ def test_deferred_jobs_requeued_on_terminal() -> None:
         (3, "implementation"),
         (3, "final_verdict"),
     ]
+
+
+def test_join_all_warns_on_orphaned_deferred_jobs(caplog: pytest.LogCaptureFixture) -> None:
+    """join_all logs a warning when deferred jobs remain unflushed."""
+
+    def handler(job: JobRecord) -> None:
+        pass  # implementation completes but never reaches final_verdict
+
+    manager = RepoQueueManager(handler)
+    # Issue #1 takes the lock, issue #2 gets deferred
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=1))
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=2))
+
+    with caplog.at_level(logging.WARNING, logger="dani.queue"):
+        manager.join_all()
+
+    assert any("deferred jobs" in record.message for record in caplog.records)
