@@ -426,7 +426,7 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
         number=77,
         actor_login="agent",
         payload={},
-        body=build_signature(stage="review_round", job="job-1", pr=77, round=1),
+        body=build_signature(stage="review_round", job="job-1", pr=77, round=1, issue=5),
         title="Feature/#5",
         is_pull_request=True,
     )
@@ -725,3 +725,73 @@ def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
     assert result["status"] == "ignored"
     assert result["reason"] == "pr_not_open"
     assert github.merged == []
+
+
+def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
+    """A PR opened without any linked issue number is dropped as untracked."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
+    assert omx_runner.launches == []
+
+
+def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
+    """Review-round agent event for a PR with no traceable issue is dropped."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    review_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job="r-1", pr=42, round=1),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_event)
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
+    assert omx_runner.launches == []
+
+
+def test_implementation_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
+    """Implementation agent event for a PR with no traceable issue is dropped."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    impl_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="implementation", job="impl-1", pr=42),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(impl_event)
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=42) == []
+    assert omx_runner.launches == []
