@@ -141,6 +141,8 @@ class DaniService:
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
         next_job = self._enqueue_job(
             repo,
@@ -165,6 +167,8 @@ class DaniService:
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
         latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
@@ -202,6 +206,8 @@ class DaniService:
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
         pr_number = int(signature["pr"])
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
         if issue_number is None:
@@ -220,6 +226,8 @@ class DaniService:
 
     def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature["pr"])
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         try:
             self.github.merge_pull_request(event.repo_full_name, pr_number)
         except MergeConflictError as exc:
@@ -934,6 +942,10 @@ class DaniService:
                     "body": body if isinstance(body, str) else "",
                 }
         return {}
+
+    def _is_pr_open(self, repo_full_name: str, pr_number: int) -> bool:
+        pull_request = self.github.get_pull_request(repo_full_name, pr_number)
+        return pull_request.get("state") == "open"
 
     def _pull_request_metadata(self, repo_full_name: str, pr_number: int) -> dict[str, str]:
         for pull_request in self.github.list_pull_requests(repo_full_name):

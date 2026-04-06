@@ -645,3 +645,83 @@ def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
     assert jobs[0].status == "completed"
+
+
+def test_review_round_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Review round agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    # Close the PR before the review round event arrives
+    github.close_pull_request("acme/demo", 77)
+
+    review_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job="r-1", pr=77, round=1, issue=5),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_event)
+    service.wait_for_idle()
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=77) == []
+
+
+def test_implementation_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Implementation agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    # Close the PR before the implementation event arrives
+    github.close_pull_request("acme/demo", 77)
+
+    impl_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="implementation", job="impl-1", pr=77, issue=5),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(impl_event)
+    service.wait_for_idle()
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77) == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77) == []
+
+
+def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Final verdict agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    github.close_pull_request("acme/demo", 77)
+
+    verdict_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="v-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(verdict_event)
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert github.merged == []
