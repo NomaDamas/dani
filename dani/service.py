@@ -269,6 +269,7 @@ class DaniService:
         repo = self.storage.get_repo(job.repo_full_name)
         if repo is None:
             self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": "missing repo"})
+            job.status = "failed"
             return
 
         if job.stage == "dev_sync":
@@ -286,6 +287,7 @@ class DaniService:
                     return
             except Exception as exc:
                 self._handle_job_failure(job, exc, attempt, retry_history)
+                job.status = "failed"
                 return
             else:
                 self.storage.update_job(
@@ -293,6 +295,7 @@ class DaniService:
                     status="completed",
                     metadata={**job.metadata, "retry_attempts": attempt - 1, "retry_history": retry_history},
                 )
+                job.status = "completed"
                 return
 
     def _run_job_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -338,6 +341,7 @@ class DaniService:
                     "note": "side_effect_already_posted",
                 },
             )
+            job.status = "completed"
             return True
         retry_history.append({
             "attempt": str(attempt),
@@ -358,6 +362,7 @@ class DaniService:
                     "retry_history": retry_history,
                 },
             )
+            job.status = "failed"
             return True
         backoff = RETRY_BACKOFF_SECONDS[attempt - 1]
         logger.info("Job %s attempt %d hit transient capacity error, retrying in %ds", job.id, attempt, backoff)
