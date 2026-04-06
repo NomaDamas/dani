@@ -138,6 +138,8 @@ class DaniService:
         review_round = int(signature["round"])
         pr_number = int(signature["pr"])
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
@@ -170,6 +172,8 @@ class DaniService:
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
         if latest_review_round >= self.config.review_rounds:
@@ -871,6 +875,8 @@ class DaniService:
                 self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
         if issue_number is None:
             issue_number = self._extract_issue_number(event.body)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         job = self._enqueue_job(
             repo,
             stage="review_round",
