@@ -48,6 +48,7 @@ class FakeGitHubCLI:
             "number": pr_number,
             "title": f"PR #{pr_number}",
             "body": "",
+            "state": "open",
             "head": {"ref": f"Feature/#{pr_number}"},
             "base": {"ref": "dev"},
         }
@@ -97,9 +98,16 @@ class FakeGitHubCLI:
             "number": pr_number,
             "title": title or f"Feature/#{pr_number}",
             "body": body,
+            "state": "open",
             "head": {"ref": head_branch or f"Feature/#{pr_number}"},
             "base": {"ref": base_branch},
         })
+
+    def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        for pr in self.prs.get(repo_full_name, []):
+            if pr.get("number") == pr_number:
+                pr["state"] = "closed"
+                return
 
 
 class LaunchRecord(TypedDict):
