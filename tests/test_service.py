@@ -497,6 +497,56 @@ def test_external_pr_escalates_after_ten_review_passes(tmp_path: Path) -> None:
     assert omx_runner.launches[-1]["job"].stage == "human_escalation"
 
 
+def test_external_review_comment_queues_human_escalation_on_tenth_completed_pass(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    for round_number in range(1, 11):
+        action = "opened" if round_number == 1 else "synchronize"
+        result = service.handle_event(
+            make_pr_event(pr_number=88, action=action, body="Implements #21", commit_sha=f"sha-{round_number}")
+        )
+        service.wait_for_idle()
+
+        assert result["stage"] == "review_round"
+        review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)[-1]
+        comment_result = service.handle_event(
+            make_pr_comment_event(
+                pr_number=88,
+                body=build_signature(stage="review_round", job=review_job.id, pr=88, round=round_number),
+            )
+        )
+        service.wait_for_idle()
+
+        if round_number < 10:
+            assert comment_result == {"status": "updated", "stage": "review_round"}
+            assert service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88) == []
+            continue
+
+        assert comment_result["stage"] == "human_escalation"
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs] == list(range(1, 11))
+    assert all(job.status == "completed" for job in review_jobs)
+
+    escalation_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88)
+    assert len(escalation_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "human_escalation"
+
+    post_limit = service.handle_event(
+        make_pr_event(
+            pr_number=88,
+            action="synchronize",
+            body="Implements #21",
+            commit_sha="sha-11",
+        )
+    )
+    service.wait_for_idle()
+
+    assert post_limit == {"status": "ignored", "reason": "human_review_required"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88) == review_jobs
+    assert len(service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88)) == 1
+
+
 def test_external_pr_unique_activity_never_queues_an_eleventh_automated_review(tmp_path: Path) -> None:
     class BlockingOmxRunner(FakeOmxRunner):
         def __init__(self, github: FakeGitHubCLI) -> None:
@@ -561,18 +611,6 @@ def test_external_pr_unique_activity_never_queues_an_eleventh_automated_review(t
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
     assert [job.review_round for job in review_jobs] == list(range(1, 11))
     assert all(job.status == "completed" for job in review_jobs)
-
-    post_limit = service.handle_event(
-        make_pr_event(
-            pr_number=88,
-            action="synchronize",
-            body="Implements #21",
-            commit_sha="sha-12",
-        )
-    )
-    service.wait_for_idle()
-
-    assert post_limit["stage"] == "human_escalation"
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88) == review_jobs
     assert [job.review_round for job in review_jobs] == list(range(1, 11))
 

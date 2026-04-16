@@ -139,4 +139,4 @@ For PRs opened by external contributors, `dani` follows a lighter event-driven r
    - once all remaining automated review passes are already queued or running, extra PR-activity events are coalesced until one of those passes finishes
 4. The merge bar stays the same as the existing verdict session: requirements must be met, real verification must pass, and the PR must be approveable.
 5. Only completed automated review passes count toward escalation, but queued/running passes still reserve the remaining review budget.
-6. If automated review reaches 10 completed passes without approval, `dani` escalates the PR to a human maintainer for a manual decision.
+6. If automated review reaches 10 completed passes without approval, `dani` immediately escalates the PR to a human maintainer for a manual decision.

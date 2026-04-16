@@ -173,6 +173,7 @@ class DaniService:
             return self._handle_external_review_round_event(
                 repo,
                 event,
+                source_job=source_job,
                 pr_metadata=pr_metadata,
                 issue_number=issue_number,
                 pr_number=pr_number,
@@ -198,6 +199,7 @@ class DaniService:
         repo: RepoConfig,
         event: NormalizedEvent,
         *,
+        source_job: JobRecord,
         pr_metadata: dict[str, str],
         issue_number: int | None,
         pr_number: int,
@@ -217,6 +219,24 @@ class DaniService:
                 },
             )
             return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+
+        completed_reviews = self._completed_external_review_count(event.repo_full_name, pr_number)
+        if source_job.status != "completed":
+            completed_reviews += 1
+        if completed_reviews >= self.config.external_review_limit and not self._has_human_escalation(
+            event.repo_full_name, pr_number
+        ):
+            escalation_job = self._enqueue_external_human_escalation(
+                repo,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                metadata={
+                    **pr_metadata,
+                    "title": (pr_metadata.get("title") or event.title or ""),
+                    "external_contribution": True,
+                },
+            )
+            return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
         return {"status": "updated", "stage": "review_round"}
 
     def _enqueue_job(
@@ -785,9 +805,8 @@ class DaniService:
         completed_reviews = self._completed_external_review_count(event.repo_full_name, event.number)
         consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
         if completed_reviews >= self.config.external_review_limit:
-            escalation_job = self._enqueue_job(
+            escalation_job = self._enqueue_external_human_escalation(
                 repo,
-                stage="human_escalation",
                 issue_number=issue_number,
                 pr_number=event.number,
                 metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
@@ -807,6 +826,22 @@ class DaniService:
             metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _enqueue_external_human_escalation(
+        self,
+        repo: RepoConfig,
+        *,
+        issue_number: int | None,
+        pr_number: int,
+        metadata: dict[str, Any],
+    ) -> JobRecord:
+        return self._enqueue_job(
+            repo,
+            stage="human_escalation",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            metadata=metadata,
+        )
 
     def _latest_resumable_session(
         self,
