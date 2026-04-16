@@ -254,7 +254,7 @@ class DaniService:
     def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature["pr"])
         event_key = self._agent_event_key(signature, default_pr=pr_number)
-        if not self.storage.record_processed_event(event_key):
+        if self.storage.has_processed_event(event_key):
             return {"status": "ignored", "reason": "duplicate_agent_event"}
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
@@ -281,7 +281,9 @@ class DaniService:
                     "conflict_reason": str(exc),
                 },
             )
+            self.storage.record_processed_event(event_key)
             return {"status": "queued", "job_id": merge_conflict_job.id, "stage": merge_conflict_job.stage}
+        self.storage.record_processed_event(event_key)
         return {"status": "merged", "pr_number": pr_number}
 
     def _enqueue_job(

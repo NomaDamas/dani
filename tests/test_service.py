@@ -878,6 +878,50 @@ def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
     assert omx_runner.launches[-1]["job"].pr_number == 77
 
 
+def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> None:
+    """A transient merge failure must not poison redelivery — the retry must succeed."""
+    from github.GithubException import GithubException
+
+    service, github, _omx_runner = make_service(tmp_path)
+    service.storage.create_job(
+        JobRecord(repo_full_name="acme/demo", stage="review_round", issue_number=5, pr_number=77, review_round=1, status="completed")
+    )
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="feature/5",
+        base_branch="dev",
+    )
+    original_merge = github.merge_pull_request
+
+    def boom(repo_full_name: str, pr_number: int) -> None:
+        raise GithubException(500, {"message": "GitHub outage"}, {})
+
+    github.merge_pull_request = boom  # type: ignore[assignment]
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    with pytest.raises(GithubException):
+        service.handle_event(event)
+
+    # Restore normal merge and redeliver the same event
+    github.merge_pull_request = original_merge  # type: ignore[assignment]
+    result = service.handle_event(event)
+    assert result["status"] == "merged"
+    assert ("acme/demo", 77) in github.merged
+
+
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     github.open_issues["acme/demo"] = [
