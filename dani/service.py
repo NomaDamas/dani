@@ -226,10 +226,13 @@ class DaniService:
     def _handle_merge_conflict_resolution_agent_event(
         self, event: NormalizedEvent, signature: dict[str, str]
     ) -> dict[str, Any]:
+        pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
-        pr_number = int(signature["pr"])
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
@@ -250,6 +253,9 @@ class DaniService:
 
     def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         try:

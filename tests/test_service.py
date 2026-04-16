@@ -694,6 +694,41 @@ def test_merge_conflict_resolution_comment_queues_final_verdict_retry(tmp_path: 
     assert omx_runner.launches[-1]["job"].stage == "final_verdict"
 
 
+def test_duplicate_merge_conflict_resolution_event_is_ignored(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="merge_conflict_resolution", job="resolve-1", pr=77),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
+    assert first["status"] == "queued"
+    assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
+    assert len(verdict_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert omx_runner.launches[-1]["job"].pr_number == 77
+
+
 def test_merge_conflict_resolution_requires_its_own_signed_comment(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
@@ -803,6 +838,44 @@ def test_final_verdict_verification_rejects_unrelated_signed_comment(tmp_path: P
 
     with pytest.raises(RuntimeError, match="final-verdict-comment-missing"):
         service._verify_side_effect(repo, job)
+
+
+def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.merge_conflicts.add(("acme/demo", 77))
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    resolution_jobs = service.storage.find_jobs(
+        repo_full_name="acme/demo", stage="merge_conflict_resolution", pr_number=77
+    )
+    assert first["status"] == "queued"
+    assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
+    assert len(resolution_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert omx_runner.launches[-1]["job"].pr_number == 77
 
 
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
