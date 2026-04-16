@@ -125,6 +125,13 @@ class FakeOmxRunner:
                 pr_number,
                 build_signature(stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1),
             )
+        elif job.stage == "human_escalation":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
+            )
         elif job.stage == "dev_sync":
             pass
         else:
