@@ -55,7 +55,11 @@ class FakeGitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         self.merged.append((repo_full_name, pr_number))

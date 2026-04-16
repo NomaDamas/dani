@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -382,6 +383,41 @@ def test_review_round_verification_rejects_stale_signed_comment(tmp_path: Path) 
     github.add_pr_signature("acme/demo", 77, build_signature(stage="review_round", job="stale-job", pr=77, round=1))
 
     with pytest.raises(RuntimeError, match="review-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
+@pytest.mark.parametrize(
+    ("job", "signature", "expected_error"),
+    [
+        (
+            JobRecord(repo_full_name="acme/demo", stage="review_round", pr_number=77, review_round=2),
+            lambda job: build_signature(stage="review_round", job=job.id, pr=77, round=2),
+            "review-comment-missing",
+        ),
+        (
+            JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=5, pr_number=77),
+            lambda job: build_signature(stage="implementation", job=job.id, issue=5, pr=77),
+            "implementation-comment-missing",
+        ),
+        (
+            JobRecord(repo_full_name="acme/demo", stage="final_verdict", pr_number=77),
+            lambda job: build_signature(stage="final_verdict", job=job.id, pr=77, verdict="APPROVE"),
+            "final-verdict-comment-missing",
+        ),
+    ],
+)
+def test_pr_side_effect_verification_rejects_opt_out_comment_quoting_exact_signature(
+    tmp_path: Path,
+    job: JobRecord,
+    signature: Callable[[JobRecord], str],
+    expected_error: str,
+) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    github.pr_comment_map[("acme/demo", 77)] = [{"body": f"/dani ignore\nQuoted marker {signature(job)}"}]
+
+    with pytest.raises(RuntimeError, match=expected_error):
         service._verify_side_effect(repo, job)
 
 

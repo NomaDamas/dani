@@ -84,7 +84,11 @@ class GitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
         issue = self._repo(repo_full_name).get_issue(issue_number)
