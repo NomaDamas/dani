@@ -6,7 +6,7 @@ from typing import Any, TypedDict
 
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.models import JobRecord, SessionRecord
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_agent_signature, parse_signature
 
 
 class FakeGitHubCLI:
@@ -42,7 +42,9 @@ class FakeGitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None

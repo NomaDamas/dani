@@ -6,7 +6,7 @@ from typing import Any
 
 from github import Auth, Github
 
-from dani.signatures import parse_signature
+from dani.signatures import is_opt_out_comment, parse_agent_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
 
@@ -71,7 +71,9 @@ class GitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
