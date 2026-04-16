@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 from typing import cast
 
@@ -14,13 +15,36 @@ from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
 TEST_SECRET = "unit-test-secret"
 
 
+def add_exact_review_signature(github: FakeGitHubCLI, job: JobRecord) -> None:
+    signature_fields: dict[str, str | int] = {
+        "stage": "review_round",
+        "job": job.id,
+        "pr": int(job.pr_number or 0),
+        "round": job.review_round or 1,
+    }
+    if job.issue_number is not None:
+        signature_fields["issue"] = int(job.issue_number)
+    github.add_pr_signature(
+        job.repo_full_name,
+        int(job.pr_number or 0),
+        build_signature(**signature_fields),
+    )
+
+
 def make_service(
     tmp_path: Path, *, dev_syncer: FakeGitDevSyncer | None = None
 ) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRunner]:
+    class ExactReviewSignatureOmxRunner(FakeOmxRunner):
+        def launch(self, repo_path: Path, job: JobRecord, prompt: str):
+            session = super().launch(repo_path, job, prompt)
+            if job.stage == "review_round" and job.issue_number is not None:
+                add_exact_review_signature(self.github, job)
+            return session
+
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    omx_runner = ExactReviewSignatureOmxRunner(github)
     service = DaniService(
         config,
         storage=storage,
@@ -313,6 +337,7 @@ def test_duplicate_external_pr_activity_does_not_consume_review_limit(tmp_path: 
                 pr_number=88,
                 review_round=round_number,
                 metadata={"external_contribution": True},
+                status="completed",
             )
         )
 
@@ -459,6 +484,7 @@ def test_external_pr_escalates_after_ten_review_passes(tmp_path: Path) -> None:
                 stage="review_round",
                 pr_number=88,
                 metadata={"external_contribution": True},
+                status="completed",
             )
         )
 
@@ -469,6 +495,86 @@ def test_external_pr_escalates_after_ten_review_passes(tmp_path: Path) -> None:
     escalation_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88)
     assert len(escalation_jobs) == 1
     assert omx_runner.launches[-1]["job"].stage == "human_escalation"
+
+
+def test_external_pr_unique_activity_never_queues_an_eleventh_automated_review(tmp_path: Path) -> None:
+    class BlockingOmxRunner(FakeOmxRunner):
+        def __init__(self, github: FakeGitHubCLI) -> None:
+            super().__init__(github)
+            self.review_started = threading.Event()
+            self.release_review = threading.Event()
+
+        def launch(self, repo_path: Path, job: JobRecord, prompt: str):
+            session = super().launch(repo_path, job, prompt)
+            if job.stage == "review_round":
+                add_exact_review_signature(self.github, job)
+            return session
+
+        def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+            if (
+                runtime_handle.startswith("runtime-")
+                and self.launches
+                and self.launches[-1]["job"].stage == "review_round"
+            ):
+                self.review_started.set()
+                self.release_review.wait(timeout=timeout_seconds)
+
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omx_runner = BlockingOmxRunner(github)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(OmxRunner, omx_runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+
+    opened = service.handle_event(
+        make_pr_event(pr_number=88, action="opened", body="Implements #21", commit_sha="sha-1")
+    )
+    assert opened["stage"] == "review_round"
+    assert omx_runner.review_started.wait(timeout=1)
+
+    results = []
+    for round_number in range(2, 12):
+        results.append(
+            service.handle_event(
+                make_pr_event(
+                    pr_number=88,
+                    action="synchronize",
+                    body="Implements #21",
+                    commit_sha=f"sha-{round_number}",
+                )
+            )
+        )
+
+    assert all(result["stage"] == "review_round" for result in results[:9])
+    assert results[9] == {"status": "ignored", "reason": "external_review_limit_pending"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88) == []
+
+    omx_runner.release_review.set()
+    service.wait_for_idle()
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs] == list(range(1, 11))
+    assert all(job.status == "completed" for job in review_jobs)
+
+    post_limit = service.handle_event(
+        make_pr_event(
+            pr_number=88,
+            action="synchronize",
+            body="Implements #21",
+            commit_sha="sha-12",
+        )
+    )
+    service.wait_for_idle()
+
+    assert post_limit["stage"] == "human_escalation"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88) == review_jobs
+    assert [job.review_round for job in review_jobs] == list(range(1, 11))
 
 
 def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> None:

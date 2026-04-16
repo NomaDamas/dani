@@ -762,6 +762,19 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
+        return self._queue_external_pull_request_review(
+            repo,
+            event,
+            issue_number=issue_number,
+        )
+
+    def _queue_external_pull_request_review(
+        self,
+        repo: RepoConfig,
+        event: NormalizedEvent,
+        *,
+        issue_number: int | None,
+    ) -> dict[str, Any]:
         event_key = self._external_pull_request_event_key(event)
         if not self.storage.record_processed_event(event_key):
             return {"status": "ignored", "reason": "duplicate_external_pr_event"}
@@ -769,7 +782,8 @@ class DaniService:
         if self._has_human_escalation(event.repo_full_name, event.number):
             return {"status": "ignored", "reason": "human_review_required"}
 
-        completed_reviews = self._external_review_count(event.repo_full_name, event.number)
+        completed_reviews = self._completed_external_review_count(event.repo_full_name, event.number)
+        consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
         if completed_reviews >= self.config.external_review_limit:
             escalation_job = self._enqueue_job(
                 repo,
@@ -780,12 +794,16 @@ class DaniService:
             )
             return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
 
+        if len(consumed_review_rounds) >= self.config.external_review_limit:
+            return {"status": "ignored", "reason": "external_review_limit_pending"}
+
+        next_review_round = max(consumed_review_rounds, default=0) + 1
         job = self._enqueue_job(
             repo,
             stage="review_round",
             issue_number=issue_number,
             pr_number=event.number,
-            review_round=completed_reviews + 1,
+            review_round=next_review_round,
             metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
@@ -850,12 +868,23 @@ class DaniService:
         ]
         return max(rounds, default=0)
 
-    def _external_review_count(self, repo_full_name: str, pr_number: int) -> int:
+    def _completed_external_review_count(self, repo_full_name: str, pr_number: int) -> int:
         return sum(
             1
             for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
-            if job.metadata.get("external_contribution")
+            if job.metadata.get("external_contribution") and job.status == "completed"
         )
+
+    def _consumed_external_review_rounds(self, repo_full_name: str, pr_number: int) -> set[int]:
+        return {
+            int(job.review_round)
+            for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
+            if (
+                job.metadata.get("external_contribution")
+                and job.review_round is not None
+                and job.status in {"queued", "launched", "completed"}
+            )
+        }
 
     def _has_human_escalation(self, repo_full_name: str, pr_number: int) -> bool:
         return bool(
