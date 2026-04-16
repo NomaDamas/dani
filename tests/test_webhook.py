@@ -13,9 +13,10 @@ def test_normalize_pull_request_synchronize_event() -> None:
                 "title": "Feature/#21",
                 "body": "Implements #21",
                 "base": {"ref": "dev"},
-                "head": {"ref": "feature/#21"},
+                "head": {"ref": "feature/#21", "sha": "abc123"},
             },
         },
+        delivery_id="delivery-1",
     )
 
     assert event is not None
@@ -23,6 +24,8 @@ def test_normalize_pull_request_synchronize_event() -> None:
     assert event.number == 21
     assert event.base_branch == "dev"
     assert event.head_branch == "feature/#21"
+    assert event.commit_sha == "abc123"
+    assert event.delivery_id == "delivery-1"
     assert event.is_pull_request is True
 
 
@@ -38,8 +41,9 @@ def test_normalize_pull_request_review_requested_event() -> None:
                 "title": "Feature/#21",
                 "body": "Implements #21",
                 "base": {"ref": "dev"},
-                "head": {"ref": "feature/#21"},
+                "head": {"ref": "feature/#21", "sha": "def456"},
             },
+            "requested_reviewer": {"login": "maintainer"},
         },
     )
 
@@ -48,4 +52,5 @@ def test_normalize_pull_request_review_requested_event() -> None:
     assert event.number == 21
     assert event.base_branch == "dev"
     assert event.head_branch == "feature/#21"
+    assert event.commit_sha == "def456"
     assert event.is_pull_request is True

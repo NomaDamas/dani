@@ -15,7 +15,9 @@ def verify_github_signature(secret: str, body: bytes, signature_header: str | No
     return hmac.compare_digest(expected, signature_header)
 
 
-def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent | None:
+def normalize_event(
+    event_name: str, payload: dict[str, Any], *, delivery_id: str | None = None
+) -> NormalizedEvent | None:
     repo = payload.get("repository") or {}
     repo_full_name = repo.get("full_name")
     if not repo_full_name:
@@ -33,6 +35,7 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             payload=payload,
             body=issue.get("body"),
             title=issue.get("title"),
+            delivery_id=delivery_id,
         )
 
     if event_name == "issue_comment" and action == "created":
@@ -47,6 +50,7 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             payload=payload,
             body=payload["comment"].get("body"),
             title=issue.get("title"),
+            delivery_id=delivery_id,
             is_pull_request=is_pr,
         )
 
@@ -62,6 +66,7 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             number=0,
             actor_login=payload["sender"]["login"],
             payload=payload,
+            delivery_id=delivery_id,
             ref=ref,
             commit_sha=commit_sha,
         )
@@ -85,6 +90,8 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             title=pull_request.get("title"),
             base_branch=pull_request["base"]["ref"],
             head_branch=pull_request["head"]["ref"],
+            delivery_id=delivery_id,
+            commit_sha=pull_request["head"].get("sha"),
             is_pull_request=True,
         )
 
@@ -101,6 +108,8 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             title=pull_request.get("title"),
             base_branch=pull_request["base"]["ref"],
             head_branch=pull_request["head"]["ref"],
+            delivery_id=delivery_id,
+            commit_sha=pull_request["head"].get("sha"),
             is_pull_request=True,
         )
 

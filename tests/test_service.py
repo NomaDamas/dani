@@ -38,19 +38,24 @@ def make_pr_event(
     action: str,
     body: str,
     actor_login: str = "contributor",
+    commit_sha: str | None = None,
+    delivery_id: str | None = None,
 ) -> NormalizedEvent:
+    head_sha = commit_sha or f"sha-{pr_number}-{action}"
     return NormalizedEvent(
         kind="pull_request_opened",
         repo_full_name="acme/demo",
         action=action,
         number=pr_number,
         actor_login=actor_login,
-        payload={},
+        payload={"pull_request": {"head": {"sha": head_sha}}},
         body=body,
         title=f"Feature/#{pr_number}",
         base_branch="dev",
         head_branch=f"feature/#{pr_number}",
+        commit_sha=head_sha,
         is_pull_request=True,
+        delivery_id=delivery_id,
     )
 
 
@@ -274,6 +279,107 @@ def test_external_pr_new_commit_queues_another_review_round(tmp_path: Path) -> N
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
     assert [job.review_round for job in review_jobs] == [1, 2]
     assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_duplicate_external_pr_activity_event_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21", commit_sha="sha-1"))
+    service.wait_for_idle()
+
+    first = service.handle_event(
+        make_pr_event(pr_number=88, action="synchronize", body="Implements #21", commit_sha="sha-2")
+    )
+    service.wait_for_idle()
+    duplicate = service.handle_event(
+        make_pr_event(pr_number=88, action="synchronize", body="Implements #21", commit_sha="sha-2")
+    )
+    service.wait_for_idle()
+
+    assert first["stage"] == "review_round"
+    assert duplicate == {"status": "ignored", "reason": "duplicate_external_pr_event"}
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs] == [1, 2]
+    assert len(omx_runner.launches) == 2
+
+
+def test_duplicate_external_pr_activity_does_not_consume_review_limit(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    for round_number in range(1, 10):
+        service.storage.create_job(
+            JobRecord(
+                repo_full_name="acme/demo",
+                stage="review_round",
+                pr_number=88,
+                review_round=round_number,
+                metadata={"external_contribution": True},
+            )
+        )
+
+    first = service.handle_event(
+        make_pr_event(pr_number=88, action="synchronize", body="Implements #21", commit_sha="sha-10")
+    )
+    service.wait_for_idle()
+    duplicate = service.handle_event(
+        make_pr_event(pr_number=88, action="synchronize", body="Implements #21", commit_sha="sha-10")
+    )
+    service.wait_for_idle()
+
+    assert first["stage"] == "review_round"
+    assert duplicate == {"status": "ignored", "reason": "duplicate_external_pr_event"}
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs if job.metadata.get("external_contribution")] == list(range(1, 11))
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88) == []
+
+
+def test_external_pr_fallback_dedupe_key_is_repo_scoped(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.register_repo("acme/other", str(tmp_path))
+
+    first = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="synchronize",
+            number=88,
+            actor_login="contributor",
+            payload={"pull_request": {"head": {"sha": "shared-sha"}}},
+            body="Implements #21",
+            title="Feature/#21",
+            base_branch="dev",
+            head_branch="feature/#21",
+            commit_sha="shared-sha",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    second = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/other",
+            action="synchronize",
+            number=88,
+            actor_login="contributor",
+            payload={"pull_request": {"head": {"sha": "shared-sha"}}},
+            body="Implements #21",
+            title="Feature/#21",
+            base_branch="dev",
+            head_branch="feature/#21",
+            commit_sha="shared-sha",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    assert first["stage"] == "review_round"
+    assert second["stage"] == "review_round"
+    assert [
+        job.review_round for job in service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round")
+    ] == [1]
+    assert [
+        job.review_round for job in service.storage.find_jobs(repo_full_name="acme/other", stage="review_round")
+    ] == [1]
 
 
 def test_external_pr_review_requested_queues_review_round(tmp_path: Path) -> None:

@@ -79,6 +79,7 @@ class DaniService:
             "title": event.title,
             "base_branch": event.base_branch,
             "head_branch": event.head_branch,
+            "delivery_id": event.delivery_id,
             "ref": event.ref,
             "commit_sha": event.commit_sha,
         })
@@ -761,6 +762,10 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
+        event_key = self._external_pull_request_event_key(event)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_external_pr_event"}
+
         if self._has_human_escalation(event.repo_full_name, event.number):
             return {"status": "ignored", "reason": "human_review_required"}
 
@@ -809,6 +814,33 @@ class DaniService:
                 value = str(default_pr)
             if value:
                 fields.append((key, value))
+        return ";".join(f"{key}={value}" for key, value in fields)
+
+    def _external_pull_request_event_key(self, event: NormalizedEvent) -> str:
+        if event.delivery_id:
+            return f"external_pr_event;delivery={event.delivery_id}"
+
+        fields = [
+            ("repo", event.repo_full_name),
+            ("kind", event.kind),
+            ("pr", str(event.number)),
+            ("action", event.action),
+        ]
+        if event.commit_sha:
+            fields.append(("head_sha", event.commit_sha))
+        elif event.head_branch:
+            fields.append(("head_branch", event.head_branch))
+        requested_reviewer = event.payload.get("requested_reviewer") or {}
+        reviewer_login = requested_reviewer.get("login")
+        if reviewer_login:
+            fields.append(("reviewer", str(reviewer_login)))
+        requested_team = event.payload.get("requested_team") or {}
+        team_slug = requested_team.get("slug") or requested_team.get("name")
+        if team_slug:
+            fields.append(("team", str(team_slug)))
+        updated_at = (event.payload.get("pull_request") or {}).get("updated_at")
+        if updated_at:
+            fields.append(("updated_at", str(updated_at)))
         return ";".join(f"{key}={value}" for key, value in fields)
 
     def _latest_review_round(self, repo_full_name: str, pr_number: int) -> int:
