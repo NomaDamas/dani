@@ -187,3 +187,33 @@ def test_transient_error_with_side_effect_already_posted_completes(mock_sleep: o
     assert job.metadata.get("note") == "side_effect_already_posted"
     # Should NOT have retried — only 1 launch
     assert len(omx_runner.launches) == 1
+
+
+@patch("dani.service.time.sleep")
+def test_restart_issue_request_with_stale_signed_comments_does_not_false_complete_on_transient(
+    mock_sleep: object, tmp_path: Path
+) -> None:
+    service, github, _ = make_service(tmp_path)
+    stale_signature = "<!-- dani:stage=issue_request;job=stale-job;issue=11 -->"
+    github.add_issue_signature("acme/demo", 11, stale_signature)
+
+    original_launch = service.omx_runner.launch
+
+    def launch_without_new_side_effect(repo_path: Path, job, prompt: str):
+        session = original_launch(repo_path, job, prompt)
+        github.issue_comment_map[("acme/demo", 11)] = [{"body": stale_signature}]
+        return session
+
+    service.omx_runner.launch = launch_without_new_side_effect  # type: ignore[assignment]
+
+    def wait_that_always_fails(runtime_handle: str, **kwargs: object) -> None:
+        raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
+
+    service.omx_runner.wait = wait_that_always_fails  # type: ignore[assignment]
+
+    service.handle_event(_issue_event())
+    service.wait_for_idle()
+
+    job = service.storage.list_jobs()[0]
+    assert job.status == "failed"
+    assert job.metadata.get("note") != "side_effect_already_posted"

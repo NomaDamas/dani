@@ -84,6 +84,16 @@ class FakeGitHubCLI:
     def add_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> None:
         self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append({"body": signature})
 
+    def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append(comment)
+        return comment
+
+    def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append(comment)
+        return comment
+
     def add_pull_request(
         self,
         repo_full_name: str,
@@ -130,10 +140,14 @@ class FakeOmxRunner:
         self.resumes: list[ResumeRecord] = []
         self.closed_sessions: list[str] = []
         self._transient_failures_remaining: int = 0
+        self.resume_error: Exception | None = None
 
     def set_transient_failures(self, count: int) -> None:
         """Configure the runner to raise TransientCapacityError for the next *count* wait() calls."""
         self._transient_failures_remaining = count
+
+    def set_resume_failure(self, exc: Exception) -> None:
+        self.resume_error = exc
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
@@ -201,6 +215,8 @@ class FakeOmxRunner:
             )
 
     def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        if self.resume_error is not None:
+            raise self.resume_error
         issue_number = job.issue_number or 0
         self.github.add_issue_signature(
             job.repo_full_name,

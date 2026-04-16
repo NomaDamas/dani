@@ -85,7 +85,7 @@ class RepoQueueManager:
     def _after_job(self, repo: str, job: JobRecord) -> None:
         if not self._needs_issue_lock(job):
             return
-        if job.stage in _TERMINAL_STAGES or job.status == "failed":
+        if job.stage in _TERMINAL_STAGES or job.status in {"failed", "superseded"}:
             self._flush_deferred(repo)
 
     def _flush_deferred(self, repo: str) -> None:

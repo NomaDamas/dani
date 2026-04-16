@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dani.errors import TransientCapacityError
+from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
@@ -75,6 +75,26 @@ class DaniService:
 
     def state_snapshot(self) -> dict[str, Any]:
         return self.storage.snapshot()
+
+    def restart_issue(self, repo_full_name: str, issue_number: int) -> JobRecord:
+        repo = self.storage.get_repo(repo_full_name)
+        if repo is None:
+            msg = f"missing_repo: {repo_full_name}"
+            raise RuntimeError(msg)
+
+        for job in self.storage.find_jobs(repo_full_name=repo_full_name, issue_number=issue_number):
+            self.storage.update_job(job.id, status="superseded")
+
+        issue_metadata = self._issue_metadata(repo_full_name, issue_number)
+        return self._enqueue_job(
+            repo,
+            stage="issue_request",
+            issue_number=issue_number,
+            metadata={
+                "title": issue_metadata.get("title", f"Issue #{issue_number}"),
+                "body": issue_metadata.get("body", ""),
+            },
+        )
 
     def handle_event(self, event: NormalizedEvent) -> dict[str, Any]:
         self.storage.append_event({
@@ -278,6 +298,11 @@ class DaniService:
         return job
 
     def _run_job(self, job: JobRecord) -> None:
+        stored_job = self.storage.get_job(job.id)
+        if stored_job is not None and stored_job.status == "superseded":
+            job.status = "superseded"
+            return
+
         repo = self.storage.get_repo(job.repo_full_name)
         if repo is None:
             self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": "missing repo"})
@@ -393,16 +418,18 @@ class DaniService:
         attempt: int,
         retry_history: list[dict[str, str]],
     ) -> None:
-        self.storage.update_job(
-            job.id,
-            status="failed",
-            metadata={
-                **job.metadata,
-                "error": str(exc),
-                "retry_attempts": attempt - 1,
-                "retry_history": retry_history,
-            },
-        )
+        metadata = {
+            **job.metadata,
+            "error": str(exc),
+            "retry_attempts": attempt - 1,
+            "retry_history": retry_history,
+        }
+        if self._is_rollout_missing_error(exc):
+            metadata["error"] = "rollout_missing"
+            metadata["error_detail"] = str(exc)
+            with contextlib.suppress(Exception):
+                self._post_session_lost_warning(job)
+        self.storage.update_job(job.id, status="failed", metadata=metadata)
 
     def _run_dev_sync_job(self, repo: RepoConfig, job: JobRecord) -> None:
         session = None
@@ -531,6 +558,7 @@ class DaniService:
                 "issue_number": issue_number,
                 "issue_title": issue_title,
                 "issue_body": issue_body,
+                "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
         )
@@ -709,12 +737,13 @@ class DaniService:
         )
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        if self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue") is None:
+        signature = build_signature(stage="issue_request", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-request-comment-missing")
 
     def _verify_issue_followup_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        latest_comment = self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue")
-        if latest_comment is None or latest_comment[1].get("stage") != "issue_followup":
+        signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-followup-comment-missing")
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -774,6 +803,13 @@ class DaniService:
     def _has_exact_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> bool:
         return bool(
             self.github.find_comments_by_signature(repo_full_name, pr_number, kind="pr", signature_fragment=signature)
+        )
+
+    def _has_exact_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> bool:
+        return bool(
+            self.github.find_comments_by_signature(
+                repo_full_name, issue_number, kind="issue", signature_fragment=signature
+            )
         )
 
     def _is_approve_comment(self, body: str | None) -> bool:
@@ -973,3 +1009,44 @@ class DaniService:
             author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
             rendered.append(f"[{author}]\n{body}")
         return "\n\n".join(rendered)
+
+    def _render_issue_discussion(self, repo_full_name: str, issue_number: int, *, limit: int = 8) -> str:
+        comments = self.github.issue_comments(repo_full_name, issue_number)
+        rendered: list[str] = []
+        for comment in comments[-limit:]:
+            body = str(comment.get("body") or "").strip()
+            if not body:
+                continue
+            author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
+            rendered.append(f"[{author}]\n{body}")
+        return "\n\n".join(rendered)
+
+    def _is_rollout_missing_error(self, exc: Exception) -> bool:
+        if isinstance(exc, RolloutMissingError):
+            return True
+        error_text = str(exc)
+        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+
+    def _post_session_lost_warning(self, job: JobRecord) -> None:
+        if job.stage != "issue_followup" or job.issue_number is None:
+            return
+        event_key = f"repo={job.repo_full_name};stage=session_lost;issue={job.issue_number}"
+        signature = build_signature(stage="session_lost", issue=job.issue_number)
+        if self.github.find_comments_by_signature(
+            job.repo_full_name,
+            job.issue_number,
+            kind="issue",
+            signature_fragment=signature,
+        ):
+            if not self.storage.has_processed_event(event_key):
+                self.storage.record_processed_event(event_key)
+            return
+        if self.storage.has_processed_event(event_key):
+            return
+        body = (
+            "⚠️ dani 세션 기록이 유실되어 이전 대화를 이어갈 수 없습니다. "
+            f"`dani restart-issue {job.repo_full_name} {job.issue_number}` 로 새 세션을 시작해 주세요.\n\n"
+            f"{signature}"
+        )
+        self.github.create_issue_comment(job.repo_full_name, job.issue_number, body)
+        self.storage.record_processed_event(event_key)

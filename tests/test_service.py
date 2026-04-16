@@ -3,6 +3,7 @@ from typing import cast
 
 import pytest
 
+from dani.errors import RolloutMissingError
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
@@ -51,6 +52,29 @@ def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
 
     session = service.storage.list_sessions()[0]
     assert session.omx_session_id == "omx-" + session.job_id
+
+
+def test_issue_request_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=21)
+    expected_signature = build_signature(stage="issue_request", job=job.id, issue=21)
+    github.add_issue_signature("acme/demo", 21, build_signature(stage="issue_request", job="stale-job", issue=21))
+    github.add_issue_signature("acme/demo", 21, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_issue_request_verification_rejects_stale_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=21)
+    github.add_issue_signature("acme/demo", 21, build_signature(stage="issue_request", job="stale-job", issue=21))
+
+    with pytest.raises(RuntimeError, match="issue-request-comment-missing"):
+        service._verify_side_effect(repo, job)
 
 
 def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
@@ -134,6 +158,250 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
 
     assert result == {"status": "ignored", "reason": "missing_issue_session"}
     assert omx_runner.resumes == []
+
+
+def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=31)
+    expected_signature = build_signature(stage="issue_followup", job=job.id, issue=31)
+    github.add_issue_signature("acme/demo", 31, build_signature(stage="issue_followup", job="stale-job", issue=31))
+    github.add_issue_signature("acme/demo", 31, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=31)
+    github.add_issue_signature("acme/demo", 31, build_signature(stage="issue_followup", job="stale-job", issue=31))
+
+    with pytest.raises(RuntimeError, match="issue-followup-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
+def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warning(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=33,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=33,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please continue.",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=33)[0]
+    assert job.status == "failed"
+    assert job.metadata["error"] == "rollout_missing"
+    assert "thread/resume failed" in job.metadata["error_detail"]
+
+    warning_signature = build_signature(stage="session_lost", issue=33)
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo", 33, kind="issue", signature_fragment=warning_signature
+    )
+    assert len(warning_comments) == 1
+    assert "dani restart-issue acme/demo 33" in warning_comments[0]["body"]
+    latest_comment = github.latest_signature_comment("acme/demo", 33, kind="issue")
+    assert latest_comment is not None
+    assert latest_comment[1]["stage"] == "session_lost"
+    assert latest_comment[1]["issue"] == "33"
+
+
+def test_issue_followup_rollout_missing_warning_comment_is_posted_only_once(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=34,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=34,
+        actor_login="human",
+        payload={"issue": {"body": "Need automation"}},
+        body="Please continue.",
+        title="Need automation",
+    )
+
+    service.handle_event(event)
+    service.wait_for_idle()
+    service.handle_event(event)
+    service.wait_for_idle()
+
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo",
+        34,
+        kind="issue",
+        signature_fragment=build_signature(stage="session_lost", issue=34),
+    )
+    assert len(warning_comments) == 1
+    matching_keys = [
+        key
+        for key in service.storage.snapshot()["processed_events"]["keys"]
+        if "stage=session_lost" in key and "issue=34" in key
+    ]
+    assert len(matching_keys) == 1
+    failed_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=34)
+    assert len(failed_jobs) == 2
+    assert all(job.status == "failed" for job in failed_jobs)
+
+
+def test_issue_followup_rollout_missing_retries_warning_after_comment_post_failure(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=35,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    original_create_issue_comment = github.create_issue_comment
+    attempts = 0
+
+    def flaky_create_issue_comment(repo_full_name: str, issue_number: int, body: str) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "temporary GitHub failure"
+            raise RuntimeError(msg)
+        return original_create_issue_comment(repo_full_name, issue_number, body)
+
+    github.create_issue_comment = flaky_create_issue_comment  # type: ignore[assignment]
+
+    event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=35,
+        actor_login="human",
+        payload={"issue": {"body": "Need automation"}},
+        body="Please continue.",
+        title="Need automation",
+    )
+
+    service.handle_event(event)
+    service.wait_for_idle()
+    service.handle_event(event)
+    service.wait_for_idle()
+
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo",
+        35,
+        kind="issue",
+        signature_fragment=build_signature(stage="session_lost", issue=35),
+    )
+    assert attempts == 2
+    assert len(warning_comments) == 1
+    matching_keys = [
+        key
+        for key in service.storage.snapshot()["processed_events"]["keys"]
+        if "stage=session_lost" in key and "issue=35" in key
+    ]
+    assert len(matching_keys) == 1
+
+
+def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    service.queue_manager.submit = lambda job: None  # type: ignore[assignment]
+    stale_request = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=41,
+        status="completed",
+        metadata={"title": "Restart me", "body": "Original body"},
+    )
+    stale_followup = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_followup",
+        issue_number=41,
+        status="failed",
+        metadata={"omx_session_id": "omx-stale", "title": "Restart me", "body": "Original body"},
+    )
+    untouched = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=99, status="completed")
+    service.storage.create_job(stale_request)
+    service.storage.create_job(stale_followup)
+    service.storage.create_job(untouched)
+    github.issue_comment_map[("acme/demo", 41)] = [
+        {"body": "Earlier user context", "user": {"login": "human"}},
+        {"body": "Earlier dani reply", "user": {"login": "dani"}},
+    ]
+
+    new_job = service.restart_issue("acme/demo", 41)
+
+    refreshed_request = service.storage.get_job(stale_request.id)
+    refreshed_followup = service.storage.get_job(stale_followup.id)
+    untouched_job = service.storage.get_job(untouched.id)
+    assert refreshed_request is not None and refreshed_request.status == "superseded"
+    assert refreshed_followup is not None and refreshed_followup.status == "superseded"
+    assert untouched_job is not None and untouched_job.status == "completed"
+    assert new_job.stage == "issue_request"
+    assert new_job.status == "queued"
+    assert new_job.issue_number == 41
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    prompt = service._build_prompt(repo, new_job)
+    assert "Earlier user context" in prompt
+    assert "Earlier dani reply" in prompt
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:

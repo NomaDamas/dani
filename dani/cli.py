@@ -78,3 +78,16 @@ def show_state(data_dir: Path = DATA_DIR_OPTION) -> None:
     """Print current dani state."""
     service = build_service(data_dir=data_dir)
     typer.echo(json.dumps(service.state_snapshot(), ensure_ascii=False, indent=2))
+
+
+@app.command("restart-issue")
+def restart_issue(
+    repo_full_name: str = FULL_NAME_ARGUMENT,
+    issue_number: int = typer.Argument(..., help="Issue number"),
+    data_dir: Path = DATA_DIR_OPTION,
+) -> None:
+    """Supersede stale issue jobs, run a fresh issue_request, and wait for completion."""
+    service = build_service(data_dir=data_dir)
+    job = service.restart_issue(repo_full_name, issue_number)
+    service.wait_for_idle()
+    typer.echo(json.dumps(job.to_dict(), ensure_ascii=False, indent=2))
