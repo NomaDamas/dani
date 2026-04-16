@@ -884,7 +884,14 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
 
     service, github, _omx_runner = make_service(tmp_path)
     service.storage.create_job(
-        JobRecord(repo_full_name="acme/demo", stage="review_round", issue_number=5, pr_number=77, review_round=1, status="completed")
+        JobRecord(
+            repo_full_name="acme/demo",
+            stage="review_round",
+            issue_number=5,
+            pr_number=77,
+            review_round=1,
+            status="completed",
+        )
     )
     github.add_pull_request(
         "acme/demo",
