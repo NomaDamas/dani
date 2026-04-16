@@ -32,6 +32,42 @@ def make_service(
     return service, github, omx_runner
 
 
+def make_pr_event(
+    *,
+    pr_number: int,
+    action: str,
+    body: str,
+    actor_login: str = "contributor",
+) -> NormalizedEvent:
+    return NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action=action,
+        number=pr_number,
+        actor_login=actor_login,
+        payload={},
+        body=body,
+        title=f"Feature/#{pr_number}",
+        base_branch="dev",
+        head_branch=f"feature/#{pr_number}",
+        is_pull_request=True,
+    )
+
+
+def make_pr_comment_event(*, pr_number: int, body: str, actor_login: str = "agent") -> NormalizedEvent:
+    return NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=pr_number,
+        actor_login=actor_login,
+        payload={},
+        body=body,
+        title=f"Feature/#{pr_number}",
+        is_pull_request=True,
+    )
+
+
 def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
 
@@ -210,6 +246,123 @@ def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: P
     assert result["stage"] == "review_round"
     assert review_jobs[0].review_round == 1
     assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_external_pr_opened_queues_review_round(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs] == [1]
+    assert review_jobs[0].metadata["external_contribution"] is True
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_external_pr_new_commit_queues_another_review_round(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
+    service.wait_for_idle()
+
+    result = service.handle_event(make_pr_event(pr_number=88, action="synchronize", body="Implements #21"))
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
+    assert [job.review_round for job in review_jobs] == [1, 2]
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_external_pr_review_requested_queues_review_round(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(make_pr_event(pr_number=91, action="review_requested", body="Implements #21"))
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_external_review_comment_does_not_queue_implementation(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
+    service.wait_for_idle()
+    review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)[-1]
+
+    result = service.handle_event(
+        make_pr_comment_event(
+            pr_number=88,
+            body=build_signature(stage="review_round", job=review_job.id, pr=88, round=1),
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "updated", "stage": "review_round"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88) == []
+    assert len(omx_runner.launches) == 1
+    assert github.merged == []
+
+
+def test_external_review_approve_comment_queues_final_verdict(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
+    service.wait_for_idle()
+    review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)[-1]
+
+    result = service.handle_event(
+        make_pr_comment_event(
+            pr_number=88,
+            body=f"/approve\n{build_signature(stage='review_round', job=review_job.id, pr=88, round=1)}",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "final_verdict"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88) == []
+    assert len(service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=88)) == 1
+    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert github.merged == []
+
+
+def test_external_final_verdict_approve_merges_without_implementation_job(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        make_pr_comment_event(
+            pr_number=88,
+            body=build_signature(stage="final_verdict", job="verdict-1", pr=88, verdict="APPROVE"),
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "merged", "pr_number": 88}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88) == []
+    assert omx_runner.launches == []
+    assert github.merged == [("acme/demo", 88)]
+
+
+def test_external_pr_escalates_after_ten_review_passes(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    for _ in range(10):
+        service.storage.create_job(
+            JobRecord(
+                repo_full_name="acme/demo",
+                stage="review_round",
+                pr_number=88,
+                metadata={"external_contribution": True},
+            )
+        )
+
+    result = service.handle_event(make_pr_event(pr_number=88, action="synchronize", body="Implements #21"))
+    service.wait_for_idle()
+
+    assert result["stage"] == "human_escalation"
+    escalation_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88)
+    assert len(escalation_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "human_escalation"
 
 
 def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> None:

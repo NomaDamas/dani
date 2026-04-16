@@ -122,6 +122,30 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
+def test_review_round_prompt_for_external_contribution_mentions_contributor_ownership() -> None:
+    prompt = render_prompt(
+        "review_round",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "round_number": 2,
+            "round_total": 10,
+            "review_mode_note": (
+                "This is an external contribution PR. The contributor owns any follow-up implementation. "
+                "If the PR is ready to merge, include /approve in your review comment so dani can run the final verdict pass."
+            ),
+            "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
+        },
+    )
+
+    assert "2 / 10" in prompt
+    assert "external contribution pr" in prompt.lower()
+    assert "/approve" in prompt
+
+
 def test_final_verdict_prompt_contains_both_signatures() -> None:
     prompt = render_prompt(
         "final_verdict",
@@ -160,3 +184,23 @@ def test_final_verdict_prompt_requires_general_real_result_evidence() -> None:
     assert "web:" not in prompt.lower()
     assert "cli:" not in prompt.lower()
     assert "backend:" not in prompt.lower()
+
+
+def test_human_escalation_prompt_mentions_review_limit_and_signature() -> None:
+    prompt = render_prompt(
+        "human_escalation",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "review_limit": 10,
+            "signature": "<!-- dani:stage=human_escalation;job=abc;pr=5 -->",
+        },
+    )
+
+    assert "10" in prompt
+    assert "human maintainer" in prompt.lower()
+    assert "gh pr comment 5 --repo acme/demo --body-file <human-escalation.md>" in prompt
+    assert "stage=human_escalation" in prompt

@@ -92,6 +92,7 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
+    external_review_limit: int = 10
 
     @property
     def registry_path(self) -> Path:

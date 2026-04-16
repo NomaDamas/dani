@@ -66,7 +66,13 @@ def normalize_event(event_name: str, payload: dict[str, Any]) -> NormalizedEvent
             commit_sha=commit_sha,
         )
 
-    if event_name == "pull_request" and action == "opened":
+    if event_name == "pull_request" and action in {
+        "opened",
+        "synchronize",
+        "reopened",
+        "ready_for_review",
+        "review_requested",
+    }:
         pull_request = payload["pull_request"]
         return NormalizedEvent(
             kind="pull_request_opened",
