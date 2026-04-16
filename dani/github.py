@@ -12,6 +12,7 @@ from dani.signatures import parse_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
 LOGGER = logging.getLogger(__name__)
+MERGE_CONFLICT_STATUSES = frozenset({405, 409, 422})
 
 
 class MergeConflictError(RuntimeError):
@@ -132,7 +133,9 @@ class GitHubCLI:
         try:
             merge_status = pull_request.merge(merge_method="merge", delete_branch=False)
         except GithubException as exc:
-            raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+            if exc.status in MERGE_CONFLICT_STATUSES:
+                raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+            raise
         if not merge_status.merged:
             raise MergeConflictError(repo_full_name, pr_number, message=merge_status.message)
         try:

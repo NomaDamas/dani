@@ -218,6 +218,16 @@ def test_merge_pull_request_raises_merge_conflict_error_for_merge_api_failures(
     assert exc_info.value.status == status
 
 
+def test_merge_pull_request_reraises_non_conflict_github_failures(fake_repo: FakeRepo) -> None:
+    fake_repo.pulls[7].merge_exception = GithubException(500, {"message": "GitHub outage"}, {})
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    with pytest.raises(GithubException) as exc_info:
+        github.merge_pull_request("acme/demo", 7)
+
+    assert exc_info.value.status == 500
+
+
 def test_merge_pull_request_raises_merge_conflict_error_when_merge_status_is_false(fake_repo: FakeRepo) -> None:
     fake_repo.pulls[7].merge_status = FakeMergeStatus(merged=False, message="Pull Request is not mergeable")
     github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))

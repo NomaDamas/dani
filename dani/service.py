@@ -259,10 +259,13 @@ class DaniService:
             if repo is None:
                 return {"status": "ignored", "reason": "missing_repo"}
             pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+            if issue_number is None:
+                issue_number = self._extract_issue_number(pull_request.get("body"))
             merge_conflict_job = self._enqueue_job(
                 repo,
                 stage="merge_conflict_resolution",
-                issue_number=self._extract_issue_number(pull_request.get("body")),
+                issue_number=issue_number,
                 pr_number=pr_number,
                 metadata={
                     "title": pull_request.get("title") or event.title or f"PR #{pr_number}",
