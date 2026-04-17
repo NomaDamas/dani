@@ -207,6 +207,13 @@ class FakeOmxRunner:
                 pr_number,
                 build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             )
+        elif job.stage == "human_escalation":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
+            )
         elif job.stage != "dev_sync":
             self.github.add_pr_signature(
                 repo_full_name,
