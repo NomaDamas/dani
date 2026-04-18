@@ -526,7 +526,6 @@ def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> 
     assert omx_runner.launches == []
 
 
-
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
