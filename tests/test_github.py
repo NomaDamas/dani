@@ -175,6 +175,42 @@ def test_create_issue_and_pr_comments_use_repository_objects(fake_repo: FakeRepo
     assert fake_repo.pulls[7].created_issue_comments == ["hello pr"]
 
 
+def test_latest_signature_comment_ignores_opt_out_marker(fake_repo: FakeRepo) -> None:
+    fake_repo.issues[5] = FakeIssue([
+        "<!-- dani:stage=issue_request;job=job-1;issue=5 -->",
+        "<!-- dani:stage=ignore -->",
+    ])
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    latest = github.latest_signature_comment("acme/demo", 5, kind="issue")
+
+    assert latest is not None
+    assert latest[1]["stage"] == "issue_request"
+
+
+def test_latest_signature_comment_skips_dani_ignore_command_even_with_embedded_signature(fake_repo: FakeRepo) -> None:
+    fake_repo.issues[5] = FakeIssue([
+        "<!-- dani:stage=issue_request;job=job-1;issue=5 -->",
+        "/dani ignore\nQuoted marker <!-- dani:stage=review_round;job=job-2;pr=7;round=1 -->",
+    ])
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    latest = github.latest_signature_comment("acme/demo", 5, kind="issue")
+
+    assert latest is not None
+    assert latest[1]["stage"] == "issue_request"
+
+
+def test_find_comments_by_signature_skips_opt_out_comment_that_quotes_exact_signature(fake_repo: FakeRepo) -> None:
+    signature = "<!-- dani:stage=review_round;job=job-2;pr=7;round=1 -->"
+    fake_repo.pulls[7] = FakePullRequest(number=7, body="body", comments=[f"/dani ignore\nQuoted marker {signature}"])
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    matching_comments = github.find_comments_by_signature("acme/demo", 7, kind="pr", signature_fragment=signature)
+
+    assert matching_comments == []
+
+
 def test_ensure_pull_request_updates_existing_open_pull_request(fake_repo: FakeRepo) -> None:
     github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
 

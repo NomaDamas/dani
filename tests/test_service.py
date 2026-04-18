@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -199,6 +200,63 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
 
     assert result == {"status": "ignored", "reason": "missing_issue_session"}
     assert omx_runner.resumes == []
+
+
+def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=36,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=36,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please ignore this.\n<!-- dani:stage=ignore -->",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=36) == []
+    assert omx_runner.resumes == []
+
+
+def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=37,
+            actor_login="human",
+            payload={"issue": {"body": "context"}},
+            body="/approve\n/dani ignore",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=37) == []
+    assert omx_runner.launches == []
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
@@ -820,6 +878,41 @@ def test_review_round_verification_rejects_stale_signed_comment(tmp_path: Path) 
         service._verify_side_effect(repo, job)
 
 
+@pytest.mark.parametrize(
+    ("job", "signature", "expected_error"),
+    [
+        (
+            JobRecord(repo_full_name="acme/demo", stage="review_round", pr_number=77, review_round=2),
+            lambda job: build_signature(stage="review_round", job=job.id, pr=77, round=2),
+            "review-comment-missing",
+        ),
+        (
+            JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=5, pr_number=77),
+            lambda job: build_signature(stage="implementation", job=job.id, issue=5, pr=77),
+            "implementation-comment-missing",
+        ),
+        (
+            JobRecord(repo_full_name="acme/demo", stage="final_verdict", pr_number=77),
+            lambda job: build_signature(stage="final_verdict", job=job.id, pr=77, verdict="APPROVE"),
+            "final-verdict-comment-missing",
+        ),
+    ],
+)
+def test_pr_side_effect_verification_rejects_opt_out_comment_quoting_exact_signature(
+    tmp_path: Path,
+    job: JobRecord,
+    signature: Callable[[JobRecord], str],
+    expected_error: str,
+) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    github.pr_comment_map[("acme/demo", 77)] = [{"body": f"/dani ignore\nQuoted marker {signature(job)}"}]
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        service._verify_side_effect(repo, job)
+
+
 def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
@@ -845,6 +938,33 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
     assert len(implementation_jobs) == 1
     assert omx_runner.launches[-1]["job"].stage == "implementation"
     assert omx_runner.launches[-1]["job"].pr_number == 77
+
+
+def test_pull_request_comment_with_ignore_signature_skips_agent_transition(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=77,
+            actor_login="human",
+            payload={},
+            body=(
+                "Please do not trigger this.\n"
+                "<!-- dani:stage=ignore -->\n"
+                f"{build_signature(stage='review_round', job='job-1', pr=77, round=1)}"
+            ),
+            title="Feature/#5",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=77) == []
+    assert omx_runner.launches == []
 
 
 def test_implementation_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -932,6 +1052,42 @@ def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_p
     assert isinstance(only_job, JobRecord)
     assert only_job.issue_number == 6
     assert only_job.stage == "issue_request"
+
+
+def test_bootstrap_repo_still_skips_issue_request_when_ignore_comment_is_latest(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.open_issues["acme/demo"] = [{"number": 5, "title": "Already handled", "body": "Need sync"}]
+    github.add_issue_signature(
+        "acme/demo",
+        5,
+        build_signature(stage="issue_request", job="existing-job", issue=5),
+    )
+    github.issue_comment_map[("acme/demo", 5)].append({"body": "<!-- dani:stage=ignore -->"})
+
+    count = service.bootstrap_repo("acme/demo")
+    service.wait_for_idle()
+
+    assert count == 0
+    assert omx_runner.launches == []
+
+
+def test_bootstrap_repo_skips_opt_out_comment_that_quotes_agent_signature(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.open_issues["acme/demo"] = [{"number": 5, "title": "Already handled", "body": "Need sync"}]
+    github.add_issue_signature(
+        "acme/demo",
+        5,
+        build_signature(stage="issue_request", job="existing-job", issue=5),
+    )
+    github.issue_comment_map[("acme/demo", 5)].append({
+        "body": "/dani ignore\nQuoted marker <!-- dani:stage=review_round;job=job-2;pr=7;round=1 -->"
+    })
+
+    count = service.bootstrap_repo("acme/demo")
+    service.wait_for_idle()
+
+    assert count == 0
+    assert omx_runner.launches == []
 
 
 def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
