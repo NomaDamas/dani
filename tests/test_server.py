@@ -92,3 +92,43 @@ def test_github_webhook_endpoint_queues_dev_sync_on_main_push(tmp_path: Path) ->
 
     assert response.status_code == 200
     assert response.json()["stage"] == "dev_sync"
+
+
+def test_github_webhook_endpoint_dedupes_duplicate_external_pr_delivery(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    github = FakeGitHubCLI()
+    omx_runner = FakeOmxRunner(github)
+    service = DaniService(
+        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(OmxRunner, omx_runner)
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+    client = TestClient(create_app(service))
+    payload = {
+        "action": "synchronize",
+        "repository": {"full_name": "acme/demo"},
+        "sender": {"login": "contributor"},
+        "pull_request": {
+            "number": 21,
+            "title": "Feature/#21",
+            "body": "Implements #21",
+            "base": {"ref": "dev"},
+            "head": {"ref": "feature/#21", "sha": "sha-21-2"},
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "x-github-event": "pull_request",
+        "x-github-delivery": "delivery-21",
+        "x-hub-signature-256": _signature(TEST_SECRET, body),
+    }
+
+    first = client.post("/webhook", content=body, headers=headers)
+    second = client.post("/webhook", content=body, headers=headers)
+    service.wait_for_idle()
+
+    assert first.status_code == 200
+    assert first.json()["stage"] == "review_round"
+    assert second.status_code == 200
+    assert second.json() == {"status": "ignored", "reason": "duplicate_external_pr_event"}
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=21)
+    assert [job.review_round for job in review_jobs] == [1]

@@ -124,3 +124,19 @@ Before you submit a pull request, check that it meets these guidelines:
 
 2. If the pull request adds functionality, the docs should be updated.
    Put your new functionality into a function with a docstring, and add the feature to the list in `README.md`.
+
+## External contribution PR review process
+
+For PRs opened by external contributors, `dani` follows a lighter event-driven review loop:
+
+1. A maintainer review runs when the PR is opened.
+2. If changes are requested, the contributor owns the follow-up implementation.
+3. `dani` reviews again only when the PR changes meaningfully, such as:
+   - a new commit (`synchronize`)
+   - a renewed review request
+   - another PR-open style re-entry event (`reopened`, `ready_for_review`)
+   - duplicate webhook deliveries are ignored, using the GitHub delivery id when available and a PR activity fallback key otherwise
+   - once all remaining automated review passes are already queued or running, extra PR-activity events are coalesced until one of those passes finishes
+4. The merge bar stays the same as the existing verdict session: requirements must be met, real verification must pass, and the PR must be approveable.
+5. Only completed automated review passes count toward escalation, but queued/running passes still reserve the remaining review budget.
+6. If automated review reaches 10 completed passes without approval, `dani` immediately escalates the PR to a human maintainer for a manual decision.

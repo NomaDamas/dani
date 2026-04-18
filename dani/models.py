@@ -80,6 +80,7 @@ class NormalizedEvent:
     title: str | None = None
     base_branch: str | None = None
     head_branch: str | None = None
+    delivery_id: str | None = None
     ref: str | None = None
     commit_sha: str | None = None
     is_pull_request: bool = False
@@ -92,6 +93,7 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
+    external_review_limit: int = 10
 
     @property
     def registry_path(self) -> Path:

@@ -12,7 +12,8 @@ Simple GitHub webhook -> OMX automation loop.
 - Workflows for:
   - issue request report
   - `/approve` implementation
-  - 3 review rounds for PRs
+  - 3 review rounds for agent-authored PRs
+  - event-driven, duplicate-delivery-safe re-review for external contributor PRs
   - final verdict + auto-merge on APPROVE
 
 ## Environment

@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
 
 from github import Auth, Github
+from github.GithubException import GithubException
 
 from dani.signatures import is_opt_out_comment, parse_agent_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
+LOGGER = logging.getLogger(__name__)
+
+
+class MergeConflictError(RuntimeError):
+    def __init__(
+        self, repo_full_name: str, pr_number: int, *, status: int | None = None, message: str | None = None
+    ) -> None:
+        self.repo_full_name = repo_full_name
+        self.pr_number = pr_number
+        self.status = status
+        self.message = message or "Pull request merge failed because the branch is out of date or has conflicts."
+        super().__init__(self.message)
 
 
 class GitHubCLI:
@@ -57,6 +71,9 @@ class GitHubCLI:
 
     def list_pull_requests(self, repo_full_name: str) -> list[dict[str, Any]]:
         return [pull_request.raw_data for pull_request in self._repo(repo_full_name).get_pulls(state="open")]
+
+    def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
+        return self._repo(repo_full_name).get_pull(pr_number).raw_data
 
     def find_pr_by_signature(self, repo_full_name: str, signature_fragment: str) -> dict[str, Any] | None:
         for pull_request in self.list_pull_requests(repo_full_name):
@@ -118,4 +135,17 @@ class GitHubCLI:
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
-        pull_request.merge(merge_method="merge", delete_branch=True)
+        try:
+            merge_status = pull_request.merge(merge_method="merge", delete_branch=False)
+        except GithubException as exc:
+            raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+        if not merge_status.merged:
+            raise MergeConflictError(repo_full_name, pr_number, message=merge_status.message)
+        try:
+            pull_request.delete_branch()
+        except Exception:
+            LOGGER.warning(
+                "Pull request merged but failed to delete head branch",
+                extra={"repo_full_name": repo_full_name, "pr_number": pr_number},
+                exc_info=True,
+            )
