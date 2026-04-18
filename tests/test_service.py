@@ -764,6 +764,56 @@ def test_external_pr_review_requested_queues_review_round(tmp_path: Path) -> Non
     assert omx_runner.launches[-1]["job"].stage == "review_round"
 
 
+def test_external_pr_from_account_younger_than_one_year_is_closed(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.users["newcomer"] = {"login": "newcomer", "created_at": "3000-01-01T00:00:00Z"}
+
+    result = service.handle_event(
+        make_pr_event(pr_number=92, action="opened", body="Implements #21", actor_login="newcomer")
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "closed", "reason": "contributor_account_too_new", "pr_number": 92}
+    assert github.closed_pull_requests == [("acme/demo", 92)]
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=92) == []
+    assert omx_runner.launches == []
+    comments = github.pr_comments("acme/demo", 92)
+    assert len(comments) == 1
+    assert "at least one year old" in comments[0]["body"]
+    assert "open an issue instead" in comments[0]["body"]
+
+
+def test_external_pr_uses_pull_request_author_created_at_instead_of_sender(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    github.users["maintainer"] = {"login": "maintainer", "created_at": "2000-01-01T00:00:00Z"}
+    event = make_pr_event(pr_number=93, action="reopened", body="Implements #21", actor_login="maintainer")
+    event.payload["pull_request"]["user"] = {
+        "login": "newcomer",
+        "created_at": "3000-01-01T00:00:00Z",
+    }
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "closed", "reason": "contributor_account_too_new", "pr_number": 93}
+    assert github.closed_pull_requests == [("acme/demo", 93)]
+
+
+def test_external_pr_from_account_at_least_one_year_old_queues_review_round(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.users["veteran"] = {"login": "veteran", "created_at": "2000-01-01T00:00:00Z"}
+
+    result = service.handle_event(
+        make_pr_event(pr_number=94, action="opened", body="Implements #21", actor_login="veteran")
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    assert github.closed_pull_requests == []
+    assert all("at least one year old" not in comment["body"] for comment in github.pr_comments("acme/demo", 94))
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
 def test_external_review_comment_does_not_queue_implementation(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))

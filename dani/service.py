@@ -4,6 +4,7 @@ import contextlib
 import logging
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,12 @@ from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
 IMPLEMENTING_LABEL = "Implementing"
+MIN_EXTERNAL_CONTRIBUTOR_ACCOUNT_AGE = timedelta(days=365)
+INELIGIBLE_EXTERNAL_PR_COMMENT = (
+    "Thanks for your interest in contributing. This pull request has been closed automatically because this "
+    "repository only accepts pull requests from GitHub accounts that are at least one year old. If you would like "
+    "to request this change or feature, please open an issue instead so maintainers can review it."
+)
 
 RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
 
@@ -1054,6 +1061,12 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
+        if self._external_contributor_account_too_new(event):
+            event_key = self._external_pull_request_event_key(event)
+            if not self.storage.record_processed_event(event_key):
+                return {"status": "ignored", "reason": "duplicate_external_pr_event"}
+            return self._close_ineligible_external_pull_request(event)
+
         if issue_number is None:
             return {"status": "ignored", "reason": "untracked_pr"}
         return self._queue_external_pull_request_review(
@@ -1100,6 +1113,63 @@ class DaniService:
             metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _external_contributor_account_too_new(self, event: NormalizedEvent) -> bool:
+        created_at = self._external_contributor_created_at(event)
+        if not created_at:
+            return False
+        try:
+            account_created_at = self._parse_github_timestamp(created_at)
+        except ValueError:
+            logger.warning(
+                "Unable to parse external contributor account creation date",
+                extra={"repo_full_name": event.repo_full_name, "pr_number": event.number, "created_at": created_at},
+            )
+            return False
+        return datetime.now(tz=timezone.utc) - account_created_at < MIN_EXTERNAL_CONTRIBUTOR_ACCOUNT_AGE
+
+    def _external_contributor_created_at(self, event: NormalizedEvent) -> str | None:
+        pull_request = event.payload.get("pull_request") or {}
+        user = pull_request.get("user") or {}
+        if isinstance(user, dict):
+            created_at = user.get("created_at")
+            if created_at:
+                return str(created_at)
+        login = self._external_contributor_login(event)
+        if not login:
+            return None
+        try:
+            github_user = self.github.get_user(login)
+        except Exception:
+            logger.warning(
+                "Unable to fetch external contributor account metadata",
+                extra={"repo_full_name": event.repo_full_name, "pr_number": event.number, "login": login},
+                exc_info=True,
+            )
+            return None
+        created_at = github_user.get("created_at") if isinstance(github_user, dict) else None
+        return str(created_at) if created_at else None
+
+    def _external_contributor_login(self, event: NormalizedEvent) -> str | None:
+        pull_request = event.payload.get("pull_request") or {}
+        user = pull_request.get("user") or {}
+        if isinstance(user, dict) and user.get("login"):
+            return str(user["login"])
+        return event.actor_login or None
+
+    def _parse_github_timestamp(self, value: str) -> datetime:
+        normalized_value = value.strip()
+        if normalized_value.endswith("Z"):
+            normalized_value = f"{normalized_value[:-1]}+00:00"
+        parsed = datetime.fromisoformat(normalized_value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    def _close_ineligible_external_pull_request(self, event: NormalizedEvent) -> dict[str, Any]:
+        self.github.create_pr_comment(event.repo_full_name, event.number, INELIGIBLE_EXTERNAL_PR_COMMENT)
+        self.github.close_pull_request(event.repo_full_name, event.number)
+        return {"status": "closed", "reason": "contributor_account_too_new", "pr_number": event.number}
 
     def _enqueue_external_human_escalation(
         self,
