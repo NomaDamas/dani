@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 from uuid import uuid4
 
-from dani.errors import check_transient_capacity_error
+from dani.errors import check_rollout_missing_error, check_transient_capacity_error
 from dani.models import JobRecord, SessionRecord
 
 
@@ -155,6 +155,7 @@ class OmxRunner:
         if not stderr_path.exists():
             return
         stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        check_rollout_missing_error(stderr_text)
         check_transient_capacity_error(stderr_text)
 
     def close_session(self, runtime_handle: str) -> None:

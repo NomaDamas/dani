@@ -77,6 +77,7 @@ def test_issue_request_prompt_uses_gh_instructions() -> None:
             "issue_number": 7,
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
+            "discussion": "",
             "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
         },
     )
@@ -94,12 +95,31 @@ def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None
             "issue_number": 7,
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
+            "discussion": "",
             "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
         },
     )
 
     assert "AI-understood issue summary" in prompt
     assert "Expected Outcome" in prompt
+
+
+def test_issue_request_prompt_includes_existing_discussion_history() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "[human]\nEarlier context",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "Existing issue discussion history" in prompt
+    assert "Earlier context" in prompt
 
 
 def test_review_round_prompt_requires_code_review_and_verification() -> None:
@@ -186,26 +206,6 @@ def test_final_verdict_prompt_requires_general_real_result_evidence() -> None:
     assert "backend:" not in prompt.lower()
 
 
-def test_human_escalation_prompt_mentions_review_limit_and_signature() -> None:
-    prompt = render_prompt(
-        "human_escalation",
-        {
-            "repo": "acme/demo",
-            "pr_number": 5,
-            "pr_title": "Feature",
-            "pr_body": "Body",
-            "discussion": "history",
-            "review_limit": 10,
-            "signature": "<!-- dani:stage=human_escalation;job=abc;pr=5 -->",
-        },
-    )
-
-    assert "10" in prompt
-    assert "human maintainer" in prompt.lower()
-    assert "gh pr comment 5 --repo acme/demo --body-file <human-escalation.md>" in prompt
-    assert "stage=human_escalation" in prompt
-
-
 def test_merge_conflict_resolution_prompt_requires_recheck_without_direct_merge() -> None:
     prompt = render_prompt(
         "merge_conflict_resolution",
@@ -227,3 +227,23 @@ def test_merge_conflict_resolution_prompt_requires_recheck_without_direct_merge(
     assert "Do not merge the PR yourself" in prompt
     assert "stage=merge_conflict_resolution" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <merge-conflict-comment.md>" in prompt
+
+
+def test_human_escalation_prompt_mentions_review_limit_and_signature() -> None:
+    prompt = render_prompt(
+        "human_escalation",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "review_limit": 10,
+            "signature": "<!-- dani:stage=human_escalation;job=abc;pr=5 -->",
+        },
+    )
+
+    assert "10" in prompt
+    assert "human maintainer" in prompt.lower()
+    assert "gh pr comment 5 --repo acme/demo --body-file <human-escalation.md>" in prompt
+    assert "stage=human_escalation" in prompt

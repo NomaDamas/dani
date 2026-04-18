@@ -15,6 +15,9 @@ Task: review GitHub issue #$issue_number titled "$issue_title".
 Issue body:
 $issue_body
 
+Existing issue discussion history:
+$discussion
+
 Write one GitHub issue comment.
 Checklist:
 - [ ] AI-understood issue summary

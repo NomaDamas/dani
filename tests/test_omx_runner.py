@@ -4,6 +4,9 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
+from dani.errors import RolloutMissingError
 from dani.omx_runner import OmxRunner
 from dani.signatures import build_signature
 
@@ -102,3 +105,37 @@ def test_build_resume_script_uses_omx_exec_resume(tmp_path: Path) -> None:
     )
 
     assert "omx exec resume session-123 --dangerously-bypass-approvals-and-sandbox" in script
+
+
+def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollout_found(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runtime_handle = "runtime-123"
+    runtime_dir = runner.run_dir / runtime_handle
+    runtime_dir.mkdir(parents=True)
+    stdout_path = tmp_path / "stdout.log"
+    stderr_path = runtime_dir / "stderr.log"
+    stdout_path.write_text("", encoding="utf-8")
+    stderr_path.write_text(
+        "Error: thread/resume failed: no rollout found for thread id 019d6829",
+        encoding="utf-8",
+    )
+    stdout_file = stdout_path.open("w", encoding="utf-8")
+    stderr_file = stderr_path.open("a", encoding="utf-8")
+    process = type(
+        "Process",
+        (),
+        {
+            "poll": lambda self: 1,
+            "terminate": lambda self: None,
+            "wait": lambda self, timeout=None: 1,
+            "kill": lambda self: None,
+        },
+    )()
+    runner._processes[runtime_handle] = (process, stdout_file, stderr_file)
+
+    try:
+        with pytest.raises(RolloutMissingError, match="no rollout found"):
+            runner.wait(runtime_handle)
+    finally:
+        stdout_file.close()
+        stderr_file.close()
