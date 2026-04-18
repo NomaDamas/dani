@@ -5,10 +5,13 @@ from collections.abc import Callable
 from typing import Any
 
 from github import Auth, Github
+from github.GithubException import UnknownObjectException
 
 from dani.signatures import parse_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
+IMPLEMENTING_LABEL_COLOR = "FBCA04"
+IMPLEMENTING_LABEL_DESCRIPTION = "Implementation has started for this issue."
 
 
 class GitHubCLI:
@@ -91,6 +94,21 @@ class GitHubCLI:
     def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         return pull_request.create_issue_comment(body).raw_data
+
+    def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
+        repo = self._repo(repo_full_name)
+        try:
+            repo.get_label(label)
+        except UnknownObjectException as exc:
+            if exc.status != 404:
+                raise
+            repo.create_label(
+                name=label,
+                color=IMPLEMENTING_LABEL_COLOR,
+                description=IMPLEMENTING_LABEL_DESCRIPTION,
+            )
+        issue = repo.get_issue(issue_number)
+        issue.add_to_labels(label)
 
     def ensure_pull_request(
         self,

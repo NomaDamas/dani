@@ -16,6 +16,7 @@ class FakeGitHubCLI:
         self.prs: dict[str, list[dict[str, Any]]] = {}
         self.open_issues: dict[str, list[dict[str, Any]]] = {}
         self.merged: list[tuple[str, int]] = []
+        self.issue_labels: dict[tuple[str, int], list[str]] = {}
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -57,6 +58,11 @@ class FakeGitHubCLI:
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         self.merged.append((repo_full_name, pr_number))
+
+    def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
+        labels = self.issue_labels.setdefault((repo_full_name, issue_number), [])
+        if label not in labels:
+            labels.append(label)
 
     def add_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> None:
         self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append({"body": signature})
