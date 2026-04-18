@@ -264,10 +264,14 @@ class DaniService:
         review_round = int(signature["round"])
         pr_number = int(signature["pr"])
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         source_job = self.storage.get_job(signature.get("job", ""))
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
         if bool(source_job and source_job.metadata.get("external_contribution")):
             return self._handle_external_review_round_event(
@@ -586,11 +590,11 @@ class DaniService:
         if job.stage == "review_round":
             return self._build_review_round_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
-        if job.stage == "merge_conflict_resolution":
-            return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
-
         if job.stage == "human_escalation":
             return self._build_human_escalation_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+
+        if job.stage == "merge_conflict_resolution":
+            return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
         return self._build_final_verdict_prompt(job, issue_number, pr_number, pr_title, pr_body)
 
@@ -607,11 +611,11 @@ class DaniService:
         if job.stage == "review_round":
             self._verify_review_round_side_effect(repo, job)
             return
-        if job.stage == "merge_conflict_resolution":
-            self._verify_merge_conflict_resolution_side_effect(repo, job)
-            return
         if job.stage == "human_escalation":
             self._verify_human_escalation_side_effect(repo, job)
+            return
+        if job.stage == "merge_conflict_resolution":
+            self._verify_merge_conflict_resolution_side_effect(repo, job)
             return
         if job.stage == "final_verdict":
             self._verify_final_verdict_side_effect(repo, job)
@@ -1031,8 +1035,6 @@ class DaniService:
                 self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
         if issue_number is None:
             issue_number = self._extract_issue_number(event.body)
-        if issue_number is None:
-            return {"status": "ignored", "reason": "untracked_pr"}
         is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
         if is_agent_managed_pr:
             if event.action != "opened":
@@ -1047,6 +1049,8 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         return self._queue_external_pull_request_review(
             repo,
             event,
@@ -1058,7 +1062,7 @@ class DaniService:
         repo: RepoConfig,
         event: NormalizedEvent,
         *,
-        issue_number: int | None,
+        issue_number: int,
     ) -> dict[str, Any]:
         event_key = self._external_pull_request_event_key(event)
         if not self.storage.record_processed_event(event_key):

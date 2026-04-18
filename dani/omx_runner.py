@@ -44,7 +44,13 @@ class OmxRunner:
         script_path.chmod(0o755)
         stdout_file = stdout_path.open("w", encoding="utf-8")
         stderr_file = stderr_path.open("w", encoding="utf-8")
-        process = subprocess.Popen([str(script_path)], stdout=stdout_file, stderr=stderr_file)  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
+            [str(script_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
         omx_session_id = None
@@ -83,7 +89,13 @@ class OmxRunner:
         script_path.chmod(0o755)
         stdout_file = stdout_path.open("w", encoding="utf-8")
         stderr_file = stderr_path.open("w", encoding="utf-8")
-        process = subprocess.Popen([str(script_path)], stdout=stdout_file, stderr=stderr_file)  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
+            [str(script_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
         return SessionRecord(
