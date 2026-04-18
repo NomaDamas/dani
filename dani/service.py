@@ -7,11 +7,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
+from dani.agent_runner import AgentRunner, build_agent_runner
+from dani.errors import (
+    OPENCODE_SESSION_MISSING_PATTERNS,
+    ROLLOUT_MISSING_PATTERNS,
+    RolloutMissingError,
+    TransientCapacityError,
+)
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
-from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
@@ -30,13 +35,17 @@ class DaniService:
         config: DaniConfig,
         storage: JsonStorage | None = None,
         github: Any = None,
-        omx_runner: Any = None,
+        omx_runner: AgentRunner | None = None,
         dev_syncer: Any = None,
     ) -> None:
         self.config = config
         self.storage = storage or JsonStorage(config)
         self.github = github or GitHubCLI()
-        self.omx_runner = omx_runner or OmxRunner(config.run_dir)
+        self.omx_runner: AgentRunner = omx_runner or build_agent_runner(
+            config.agent_runtime,
+            config.run_dir,
+            ultrawork=config.agent_ultrawork,
+        )
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
         self.queue_manager = RepoQueueManager(self._run_job)
 
@@ -424,6 +433,10 @@ class DaniService:
         except Exception:
             self._finalize_session(session, status="failed", termination_reason="failed")
             raise
+        if session.omx_session_id is None:
+            post_wait_session_id = self.omx_runner.get_session_id(session.runtime_handle)
+            if post_wait_session_id:
+                self.storage.update_session(session.id, omx_session_id=post_wait_session_id)
         self._finalize_session(session, status="completed", termination_reason="completed")
 
     def _handle_transient_failure(
@@ -546,7 +559,7 @@ class DaniService:
             self.storage.update_job(
                 job.id,
                 status="completed",
-                metadata={**job.metadata, "sync_status": "resolved_with_omx"},
+                metadata={**job.metadata, "sync_status": "resolved_with_agent"},
             )
         except Exception as exc:
             if session is not None:
@@ -1267,7 +1280,9 @@ class DaniService:
         if isinstance(exc, RolloutMissingError):
             return True
         error_text = str(exc)
-        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+        return any(
+            pattern.search(error_text) for pattern in (*ROLLOUT_MISSING_PATTERNS, *OPENCODE_SESSION_MISSING_PATTERNS)
+        )
 
     def _post_session_lost_warning(self, job: JobRecord) -> None:
         if job.stage != "issue_followup" or job.issue_number is None:

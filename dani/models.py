@@ -94,6 +94,8 @@ class DaniConfig:
     port: int = 8787
     review_rounds: int = 3
     external_review_limit: int = 10
+    agent_runtime: str = "omx"
+    agent_ultrawork: bool = False
 
     @property
     def registry_path(self) -> Path:
