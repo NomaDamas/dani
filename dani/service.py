@@ -18,6 +18,7 @@ from dani.signatures import build_signature, is_opt_out_comment, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
+IMPLEMENTING_LABEL = "Implementing"
 
 RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
 
@@ -990,6 +991,7 @@ class DaniService:
         return False
 
     def _queue_implementation(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        self.github.ensure_issue_label(repo.full_name, event.number, IMPLEMENTING_LABEL)
         job = self._enqueue_job(
             repo,
             stage="implementation",

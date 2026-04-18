@@ -527,7 +527,7 @@ def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> 
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, github, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
         kind="issue_comment",
         repo_full_name="acme/demo",
@@ -543,8 +543,30 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
+    assert github.issue_labels[("acme/demo", 11)] == ["Implementing"]
     assert omx_runner.launches[0]["job"].stage == "implementation"
     assert service.storage.list_jobs()[0].status == "completed"
+
+
+def test_repeated_approve_keeps_implementing_label_idempotent(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=11,
+        actor_login="human",
+        payload={"issue": {"body": "context"}},
+        body="/approve",
+        title="Need automation",
+    )
+
+    service.handle_event(event)
+    service.wait_for_idle()
+    service.handle_event(event)
+    service.wait_for_idle()
+
+    assert github.issue_labels[("acme/demo", 11)] == ["Implementing"]
 
 
 def test_failed_job_still_closes_runtime_handle_and_marks_failure(tmp_path: Path) -> None:
