@@ -8,7 +8,7 @@ from dani.errors import TransientCapacityError
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_agent_signature, parse_signature
 
 _CAPACITY_MSG = "capacity"
 
@@ -60,7 +60,9 @@ class FakeGitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
@@ -71,7 +73,11 @@ class FakeGitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         if (repo_full_name, pr_number) in self.merge_conflicts:
@@ -83,6 +89,16 @@ class FakeGitHubCLI:
 
     def add_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> None:
         self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append({"body": signature})
+
+    def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append(comment)
+        return comment
+
+    def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append(comment)
+        return comment
 
     def add_pull_request(
         self,
@@ -130,10 +146,14 @@ class FakeOmxRunner:
         self.resumes: list[ResumeRecord] = []
         self.closed_sessions: list[str] = []
         self._transient_failures_remaining: int = 0
+        self.resume_error: Exception | None = None
 
     def set_transient_failures(self, count: int) -> None:
         """Configure the runner to raise TransientCapacityError for the next *count* wait() calls."""
         self._transient_failures_remaining = count
+
+    def set_resume_failure(self, exc: Exception) -> None:
+        self.resume_error = exc
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
@@ -193,6 +213,13 @@ class FakeOmxRunner:
                 pr_number,
                 build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             )
+        elif job.stage == "human_escalation":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
+            )
         elif job.stage != "dev_sync":
             self.github.add_pr_signature(
                 repo_full_name,
@@ -201,6 +228,8 @@ class FakeOmxRunner:
             )
 
     def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        if self.resume_error is not None:
+            raise self.resume_error
         issue_number = job.issue_number or 0
         self.github.add_issue_signature(
             job.repo_full_name,

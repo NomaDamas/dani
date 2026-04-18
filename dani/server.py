@@ -23,7 +23,7 @@ def create_app(service: DaniService) -> FastAPI:
         if event_name is None:
             raise HTTPException(status_code=400, detail="missing event name")
         payload = parse_body(body)
-        event = normalize_event(event_name, payload)
+        event = normalize_event(event_name, payload, delivery_id=request.headers.get("x-github-delivery"))
         if event is None:
             return {"status": "ignored", "reason": "unsupported_event"}
         return service.handle_event(event)

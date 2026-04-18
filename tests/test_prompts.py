@@ -77,6 +77,7 @@ def test_issue_request_prompt_uses_gh_instructions() -> None:
             "issue_number": 7,
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
+            "discussion": "",
             "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
         },
     )
@@ -94,12 +95,31 @@ def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None
             "issue_number": 7,
             "issue_title": "Need a bot",
             "issue_body": "Implement it",
+            "discussion": "",
             "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
         },
     )
 
     assert "AI-understood issue summary" in prompt
     assert "Expected Outcome" in prompt
+
+
+def test_issue_request_prompt_includes_existing_discussion_history() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "[human]\nEarlier context",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "Existing issue discussion history" in prompt
+    assert "Earlier context" in prompt
 
 
 def test_review_round_prompt_requires_code_review_and_verification() -> None:
@@ -120,6 +140,30 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
     assert "actual verification" in prompt.lower()
     assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
+
+
+def test_review_round_prompt_for_external_contribution_mentions_contributor_ownership() -> None:
+    prompt = render_prompt(
+        "review_round",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "round_number": 2,
+            "round_total": 10,
+            "review_mode_note": (
+                "This is an external contribution PR. The contributor owns any follow-up implementation. "
+                "If the PR is ready to merge, include /approve in your review comment so dani can run the final verdict pass."
+            ),
+            "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
+        },
+    )
+
+    assert "2 / 10" in prompt
+    assert "external contribution pr" in prompt.lower()
+    assert "/approve" in prompt
 
 
 def test_final_verdict_prompt_contains_both_signatures() -> None:
@@ -183,3 +227,23 @@ def test_merge_conflict_resolution_prompt_requires_recheck_without_direct_merge(
     assert "Do not merge the PR yourself" in prompt
     assert "stage=merge_conflict_resolution" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <merge-conflict-comment.md>" in prompt
+
+
+def test_human_escalation_prompt_mentions_review_limit_and_signature() -> None:
+    prompt = render_prompt(
+        "human_escalation",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "review_limit": 10,
+            "signature": "<!-- dani:stage=human_escalation;job=abc;pr=5 -->",
+        },
+    )
+
+    assert "10" in prompt
+    assert "human maintainer" in prompt.lower()
+    assert "gh pr comment 5 --repo acme/demo --body-file <human-escalation.md>" in prompt
+    assert "stage=human_escalation" in prompt

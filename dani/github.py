@@ -8,10 +8,11 @@ from typing import Any
 from github import Auth, Github
 from github.GithubException import GithubException
 
-from dani.signatures import parse_signature
+from dani.signatures import is_opt_out_comment, parse_agent_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
 LOGGER = logging.getLogger(__name__)
+MERGE_CONFLICT_STATUSES = frozenset({405, 409, 422})
 
 
 class MergeConflictError(RuntimeError):
@@ -88,7 +89,9 @@ class GitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
@@ -99,7 +102,11 @@ class GitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
         issue = self._repo(repo_full_name).get_issue(issue_number)
@@ -132,7 +139,9 @@ class GitHubCLI:
         try:
             merge_status = pull_request.merge(merge_method="merge", delete_branch=False)
         except GithubException as exc:
-            raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+            if exc.status in MERGE_CONFLICT_STATUSES:
+                raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+            raise
         if not merge_status.merged:
             raise MergeConflictError(repo_full_name, pr_number, message=merge_status.message)
         try:

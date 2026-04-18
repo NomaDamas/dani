@@ -7,14 +7,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dani.errors import TransientCapacityError
+from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
@@ -76,6 +76,26 @@ class DaniService:
     def state_snapshot(self) -> dict[str, Any]:
         return self.storage.snapshot()
 
+    def restart_issue(self, repo_full_name: str, issue_number: int) -> JobRecord:
+        repo = self.storage.get_repo(repo_full_name)
+        if repo is None:
+            msg = f"missing_repo: {repo_full_name}"
+            raise RuntimeError(msg)
+
+        for job in self.storage.find_jobs(repo_full_name=repo_full_name, issue_number=issue_number):
+            self.storage.update_job(job.id, status="superseded")
+
+        issue_metadata = self._issue_metadata(repo_full_name, issue_number)
+        return self._enqueue_job(
+            repo,
+            stage="issue_request",
+            issue_number=issue_number,
+            metadata={
+                "title": issue_metadata.get("title", f"Issue #{issue_number}"),
+                "body": issue_metadata.get("body", ""),
+            },
+        )
+
     def handle_event(self, event: NormalizedEvent) -> dict[str, Any]:
         self.storage.append_event({
             "repo_full_name": event.repo_full_name,
@@ -87,12 +107,16 @@ class DaniService:
             "title": event.title,
             "base_branch": event.base_branch,
             "head_branch": event.head_branch,
+            "delivery_id": event.delivery_id,
             "ref": event.ref,
             "commit_sha": event.commit_sha,
         })
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None or not repo.enabled:
             return {"status": "ignored", "reason": "unregistered_repo"}
+
+        if event.kind in {"issue_comment", "pull_request_comment"} and is_opt_out_comment(event.body):
+            return {"status": "ignored", "reason": "comment_opt_out"}
 
         signature = parse_signature(event.body or "")
         if signature and event.kind != "pull_request_opened":
@@ -118,7 +142,7 @@ class DaniService:
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
         if stage == "review_round":
-            return self._handle_review_round_agent_event(event, signature)
+            return self._handle_review_round_event(event, signature)
 
         if stage == "implementation" and event.kind == "pull_request_comment":
             return self._handle_implementation_agent_event(event, signature)
@@ -130,36 +154,6 @@ class DaniService:
             return self._handle_final_verdict_agent_event(event, signature)
 
         return {"status": "updated", "stage": stage}
-
-    def _handle_review_round_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
-        event_key = self._agent_event_key(signature, default_pr=event.number if event.is_pull_request else None)
-        if not self.storage.record_processed_event(event_key):
-            return {"status": "ignored", "reason": "duplicate_agent_event"}
-        review_round = int(signature["round"])
-        pr_number = int(signature["pr"])
-        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
-        if issue_number is None:
-            return {"status": "ignored", "reason": "untracked_pr"}
-        repo = self.storage.get_repo(event.repo_full_name)
-        if repo is None:
-            return {"status": "ignored", "reason": "missing_repo"}
-        if not self._is_pr_open(event.repo_full_name, pr_number):
-            return {"status": "ignored", "reason": "pr_not_open"}
-        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
-        next_job = self._enqueue_job(
-            repo,
-            stage="implementation",
-            issue_number=issue_number,
-            pr_number=pr_number,
-            review_round=review_round,
-            metadata={
-                **pr_metadata,
-                "title": (pr_metadata.get("title") or event.title or ""),
-                "review_comment_body": event.body or "",
-                "triggering_review_round": review_round,
-            },
-        )
-        return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
 
     def _handle_implementation_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature.get("pr") or event.number)
@@ -206,10 +200,13 @@ class DaniService:
     def _handle_merge_conflict_resolution_agent_event(
         self, event: NormalizedEvent, signature: dict[str, str]
     ) -> dict[str, Any]:
+        pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
-        pr_number = int(signature["pr"])
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
@@ -230,6 +227,9 @@ class DaniService:
 
     def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if self.storage.has_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         try:
@@ -239,10 +239,13 @@ class DaniService:
             if repo is None:
                 return {"status": "ignored", "reason": "missing_repo"}
             pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+            if issue_number is None:
+                issue_number = self._extract_issue_number(pull_request.get("body"))
             merge_conflict_job = self._enqueue_job(
                 repo,
                 stage="merge_conflict_resolution",
-                issue_number=self._extract_issue_number(pull_request.get("body")),
+                issue_number=issue_number,
                 pr_number=pr_number,
                 metadata={
                     "title": pull_request.get("title") or event.title or f"PR #{pr_number}",
@@ -252,8 +255,100 @@ class DaniService:
                     "conflict_reason": str(exc),
                 },
             )
+            self.storage.record_processed_event(event_key)
             return {"status": "queued", "job_id": merge_conflict_job.id, "stage": merge_conflict_job.stage}
+        self.storage.record_processed_event(event_key)
         return {"status": "merged", "pr_number": pr_number}
+
+    def _handle_review_round_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        event_key = self._agent_event_key(signature, default_pr=event.number if event.is_pull_request else None)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        review_round = int(signature["round"])
+        pr_number = int(signature["pr"])
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
+        source_job = self.storage.get_job(signature.get("job", ""))
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        if bool(source_job and source_job.metadata.get("external_contribution")):
+            return self._handle_external_review_round_event(
+                repo,
+                event,
+                source_job=source_job,
+                pr_metadata=pr_metadata,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                review_round=review_round,
+            )
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
+        next_job = self._enqueue_job(
+            repo,
+            stage="implementation",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            review_round=review_round,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+                "review_comment_body": event.body or "",
+                "triggering_review_round": review_round,
+            },
+        )
+        return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
+
+    def _handle_external_review_round_event(
+        self,
+        repo: RepoConfig,
+        event: NormalizedEvent,
+        *,
+        source_job: JobRecord,
+        pr_metadata: dict[str, str],
+        issue_number: int | None,
+        pr_number: int,
+        review_round: int,
+    ) -> dict[str, Any]:
+        if self._is_approve_comment(event.body):
+            verdict_job = self._enqueue_job(
+                repo,
+                stage="final_verdict",
+                issue_number=issue_number,
+                pr_number=pr_number,
+                review_round=review_round,
+                metadata={
+                    **pr_metadata,
+                    "title": (pr_metadata.get("title") or event.title or ""),
+                    "external_contribution": True,
+                },
+            )
+            return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+
+        completed_reviews = self._completed_external_review_count(event.repo_full_name, pr_number)
+        if source_job.status != "completed":
+            completed_reviews += 1
+        if completed_reviews >= self.config.external_review_limit and not self._has_human_escalation(
+            event.repo_full_name, pr_number
+        ):
+            escalation_job = self._enqueue_external_human_escalation(
+                repo,
+                issue_number=issue_number,
+                pr_number=pr_number,
+                metadata={
+                    **pr_metadata,
+                    "title": (pr_metadata.get("title") or event.title or ""),
+                    "external_contribution": True,
+                },
+            )
+            return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
+        return {"status": "updated", "stage": "review_round"}
 
     def _enqueue_job(
         self,
@@ -278,6 +373,11 @@ class DaniService:
         return job
 
     def _run_job(self, job: JobRecord) -> None:
+        stored_job = self.storage.get_job(job.id)
+        if stored_job is not None and stored_job.status == "superseded":
+            job.status = "superseded"
+            return
+
         repo = self.storage.get_repo(job.repo_full_name)
         if repo is None:
             self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": "missing repo"})
@@ -393,16 +493,18 @@ class DaniService:
         attempt: int,
         retry_history: list[dict[str, str]],
     ) -> None:
-        self.storage.update_job(
-            job.id,
-            status="failed",
-            metadata={
-                **job.metadata,
-                "error": str(exc),
-                "retry_attempts": attempt - 1,
-                "retry_history": retry_history,
-            },
-        )
+        metadata = {
+            **job.metadata,
+            "error": str(exc),
+            "retry_attempts": attempt - 1,
+            "retry_history": retry_history,
+        }
+        if self._is_rollout_missing_error(exc):
+            metadata["error"] = "rollout_missing"
+            metadata["error_detail"] = str(exc)
+            with contextlib.suppress(Exception):
+                self._post_session_lost_warning(job)
+        self.storage.update_job(job.id, status="failed", metadata=metadata)
 
     def _run_dev_sync_job(self, repo: RepoConfig, job: JobRecord) -> None:
         session = None
@@ -491,6 +593,9 @@ class DaniService:
         if job.stage == "review_round":
             return self._build_review_round_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
+        if job.stage == "human_escalation":
+            return self._build_human_escalation_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+
         if job.stage == "merge_conflict_resolution":
             return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
@@ -508,6 +613,9 @@ class DaniService:
             return
         if job.stage == "review_round":
             self._verify_review_round_side_effect(repo, job)
+            return
+        if job.stage == "human_escalation":
+            self._verify_human_escalation_side_effect(repo, job)
             return
         if job.stage == "merge_conflict_resolution":
             self._verify_merge_conflict_resolution_side_effect(repo, job)
@@ -531,6 +639,7 @@ class DaniService:
                 "issue_number": issue_number,
                 "issue_title": issue_title,
                 "issue_body": issue_body,
+                "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
         )
@@ -641,6 +750,7 @@ class DaniService:
         pr_discussion = self._render_pr_discussion(repo.full_name, pr_number)
         if pr_discussion:
             discussion_parts.append(pr_discussion)
+        is_external_review = bool(job.metadata.get("external_contribution"))
         return render_prompt(
             "review_round",
             {
@@ -650,6 +760,13 @@ class DaniService:
                 "pr_body": pr_body,
                 "discussion": "\n\n".join(discussion_parts),
                 "round_number": job.review_round or 1,
+                "round_total": self.config.external_review_limit if is_external_review else self.config.review_rounds,
+                "review_mode_note": (
+                    "This is an external contribution PR. The contributor owns any follow-up implementation. "
+                    "If the PR is ready to merge, include /approve in your review comment so dani can run the final verdict pass."
+                    if is_external_review
+                    else ""
+                ),
                 "signature": build_signature(**signature_fields),
             },
         )
@@ -701,6 +818,11 @@ class DaniService:
                 "pr_title": pr_title,
                 "pr_body": pr_body,
                 "discussion": "\n\n".join(discussion_parts),
+                "review_cycle": (
+                    f"Review pass: {job.review_round} / {self.config.external_review_limit}"
+                    if job.review_round and job.metadata.get("external_contribution")
+                    else ""
+                ),
                 "approve_signature": build_signature(
                     stage="final_verdict", job=job.id, pr=pr_number, verdict="APPROVE"
                 ),
@@ -708,13 +830,42 @@ class DaniService:
             },
         )
 
+    def _build_human_escalation_prompt(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        issue_number: int,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+    ) -> str:
+        discussion_parts = []
+        if issue_number:
+            discussion_parts.append(f"Related issue: #{issue_number}")
+        pr_discussion = self._render_pr_discussion(repo.full_name, pr_number)
+        if pr_discussion:
+            discussion_parts.append(pr_discussion)
+        return render_prompt(
+            "human_escalation",
+            {
+                "repo": repo.full_name,
+                "pr_number": pr_number,
+                "pr_title": pr_title,
+                "pr_body": pr_body,
+                "discussion": "\n\n".join(discussion_parts),
+                "review_limit": self.config.external_review_limit,
+                "signature": build_signature(stage="human_escalation", job=job.id, pr=pr_number),
+            },
+        )
+
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        if self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue") is None:
+        signature = build_signature(stage="issue_request", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-request-comment-missing")
 
     def _verify_issue_followup_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        latest_comment = self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue")
-        if latest_comment is None or latest_comment[1].get("stage") != "issue_followup":
+        signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-followup-comment-missing")
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -771,9 +922,21 @@ class DaniService:
         ):
             raise RuntimeError("final-verdict-comment-missing")
 
+    def _verify_human_escalation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        signature = build_signature(stage="human_escalation", job=job.id, pr=int(job.pr_number or 0))
+        if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
+            raise RuntimeError("human-escalation-comment-missing")
+
     def _has_exact_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> bool:
         return bool(
             self.github.find_comments_by_signature(repo_full_name, pr_number, kind="pr", signature_fragment=signature)
+        )
+
+    def _has_exact_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> bool:
+        return bool(
+            self.github.find_comments_by_signature(
+                repo_full_name, issue_number, kind="issue", signature_fragment=signature
+            )
         )
 
     def _is_approve_comment(self, body: str | None) -> bool:
@@ -875,17 +1038,82 @@ class DaniService:
                 self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
         if issue_number is None:
             issue_number = self._extract_issue_number(event.body)
+        is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
+        if is_agent_managed_pr:
+            if event.action != "opened":
+                return {"status": "ignored", "reason": "agent_managed_pr_followup"}
+            job = self._enqueue_job(
+                repo,
+                stage="review_round",
+                issue_number=issue_number,
+                pr_number=event.number,
+                review_round=1,
+                metadata={"title": event.title or "", "body": event.body or ""},
+            )
+            return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
         if issue_number is None:
             return {"status": "ignored", "reason": "untracked_pr"}
+        return self._queue_external_pull_request_review(
+            repo,
+            event,
+            issue_number=issue_number,
+        )
+
+    def _queue_external_pull_request_review(
+        self,
+        repo: RepoConfig,
+        event: NormalizedEvent,
+        *,
+        issue_number: int,
+    ) -> dict[str, Any]:
+        event_key = self._external_pull_request_event_key(event)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_external_pr_event"}
+
+        if self._has_human_escalation(event.repo_full_name, event.number):
+            return {"status": "ignored", "reason": "human_review_required"}
+
+        completed_reviews = self._completed_external_review_count(event.repo_full_name, event.number)
+        consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
+        if completed_reviews >= self.config.external_review_limit:
+            escalation_job = self._enqueue_external_human_escalation(
+                repo,
+                issue_number=issue_number,
+                pr_number=event.number,
+                metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
+            )
+            return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
+
+        if len(consumed_review_rounds) >= self.config.external_review_limit:
+            return {"status": "ignored", "reason": "external_review_limit_pending"}
+
+        next_review_round = max(consumed_review_rounds, default=0) + 1
         job = self._enqueue_job(
             repo,
             stage="review_round",
             issue_number=issue_number,
             pr_number=event.number,
-            review_round=1,
-            metadata={"title": event.title or "", "body": event.body or ""},
+            review_round=next_review_round,
+            metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _enqueue_external_human_escalation(
+        self,
+        repo: RepoConfig,
+        *,
+        issue_number: int | None,
+        pr_number: int,
+        metadata: dict[str, Any],
+    ) -> JobRecord:
+        return self._enqueue_job(
+            repo,
+            stage="human_escalation",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            metadata=metadata,
+        )
 
     def _latest_resumable_session(
         self,
@@ -913,12 +1141,62 @@ class DaniService:
                 fields.append((key, value))
         return ";".join(f"{key}={value}" for key, value in fields)
 
+    def _external_pull_request_event_key(self, event: NormalizedEvent) -> str:
+        if event.delivery_id:
+            return f"external_pr_event;delivery={event.delivery_id}"
+
+        fields = [
+            ("repo", event.repo_full_name),
+            ("kind", event.kind),
+            ("pr", str(event.number)),
+            ("action", event.action),
+        ]
+        if event.commit_sha:
+            fields.append(("head_sha", event.commit_sha))
+        elif event.head_branch:
+            fields.append(("head_branch", event.head_branch))
+        requested_reviewer = event.payload.get("requested_reviewer") or {}
+        reviewer_login = requested_reviewer.get("login")
+        if reviewer_login:
+            fields.append(("reviewer", str(reviewer_login)))
+        requested_team = event.payload.get("requested_team") or {}
+        team_slug = requested_team.get("slug") or requested_team.get("name")
+        if team_slug:
+            fields.append(("team", str(team_slug)))
+        updated_at = (event.payload.get("pull_request") or {}).get("updated_at")
+        if updated_at:
+            fields.append(("updated_at", str(updated_at)))
+        return ";".join(f"{key}={value}" for key, value in fields)
+
     def _latest_review_round(self, repo_full_name: str, pr_number: int) -> int:
         rounds = [
             int(job.review_round or 0)
             for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
         ]
         return max(rounds, default=0)
+
+    def _completed_external_review_count(self, repo_full_name: str, pr_number: int) -> int:
+        return sum(
+            1
+            for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
+            if job.metadata.get("external_contribution") and job.status == "completed"
+        )
+
+    def _consumed_external_review_rounds(self, repo_full_name: str, pr_number: int) -> set[int]:
+        return {
+            int(job.review_round)
+            for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
+            if (
+                job.metadata.get("external_contribution")
+                and job.review_round is not None
+                and job.status in {"queued", "launched", "completed"}
+            )
+        }
+
+    def _has_human_escalation(self, repo_full_name: str, pr_number: int) -> bool:
+        return bool(
+            self.storage.find_jobs(repo_full_name=repo_full_name, stage="human_escalation", pr_number=pr_number)
+        )
 
     def _issue_number_for_signature_event(
         self,
@@ -973,3 +1251,44 @@ class DaniService:
             author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
             rendered.append(f"[{author}]\n{body}")
         return "\n\n".join(rendered)
+
+    def _render_issue_discussion(self, repo_full_name: str, issue_number: int, *, limit: int = 8) -> str:
+        comments = self.github.issue_comments(repo_full_name, issue_number)
+        rendered: list[str] = []
+        for comment in comments[-limit:]:
+            body = str(comment.get("body") or "").strip()
+            if not body:
+                continue
+            author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
+            rendered.append(f"[{author}]\n{body}")
+        return "\n\n".join(rendered)
+
+    def _is_rollout_missing_error(self, exc: Exception) -> bool:
+        if isinstance(exc, RolloutMissingError):
+            return True
+        error_text = str(exc)
+        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+
+    def _post_session_lost_warning(self, job: JobRecord) -> None:
+        if job.stage != "issue_followup" or job.issue_number is None:
+            return
+        event_key = f"repo={job.repo_full_name};stage=session_lost;issue={job.issue_number}"
+        signature = build_signature(stage="session_lost", issue=job.issue_number)
+        if self.github.find_comments_by_signature(
+            job.repo_full_name,
+            job.issue_number,
+            kind="issue",
+            signature_fragment=signature,
+        ):
+            if not self.storage.has_processed_event(event_key):
+                self.storage.record_processed_event(event_key)
+            return
+        if self.storage.has_processed_event(event_key):
+            return
+        body = (
+            "⚠️ dani 세션 기록이 유실되어 이전 대화를 이어갈 수 없습니다. "
+            f"`dani restart-issue {job.repo_full_name} {job.issue_number}` 로 새 세션을 시작해 주세요.\n\n"
+            f"{signature}"
+        )
+        self.github.create_issue_comment(job.repo_full_name, job.issue_number, body)
+        self.storage.record_processed_event(event_key)

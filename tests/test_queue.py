@@ -154,6 +154,28 @@ def test_failed_job_releases_lock() -> None:
     ]
 
 
+def test_superseded_job_releases_lock() -> None:
+    """A superseded locked job releases the issue lock so other issues can proceed."""
+    execution_order: list[tuple[int, str, str]] = []
+    lock = threading.Lock()
+
+    def handler(job: JobRecord) -> None:
+        with lock:
+            execution_order.append((job.issue_number, job.stage, job.status))  # type: ignore[arg-type]
+        if job.issue_number == 1:
+            job.status = "superseded"
+
+    manager = RepoQueueManager(handler)
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=1))
+    manager.submit(JobRecord(repo_full_name="acme/repo", stage="implementation", issue_number=2))
+    manager.join_all()
+
+    assert execution_order == [
+        (1, "implementation", "queued"),
+        (2, "implementation", "queued"),
+    ]
+
+
 def test_handler_exception_releases_lock() -> None:
     """If the handler raises an unhandled exception, the issue lock is still released."""
     execution_order: list[tuple[int, str]] = []
