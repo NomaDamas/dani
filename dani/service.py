@@ -14,7 +14,7 @@ from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, Sess
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
@@ -114,6 +114,9 @@ class DaniService:
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None or not repo.enabled:
             return {"status": "ignored", "reason": "unregistered_repo"}
+
+        if event.kind in {"issue_comment", "pull_request_comment"} and is_opt_out_comment(event.body):
+            return {"status": "ignored", "reason": "comment_opt_out"}
 
         signature = parse_signature(event.body or "")
         if signature and event.kind != "pull_request_opened":

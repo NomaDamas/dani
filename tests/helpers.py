@@ -8,7 +8,7 @@ from dani.errors import TransientCapacityError
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_agent_signature, parse_signature
 
 _CAPACITY_MSG = "capacity"
 
@@ -60,7 +60,9 @@ class FakeGitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
@@ -71,7 +73,11 @@ class FakeGitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         if (repo_full_name, pr_number) in self.merge_conflicts:

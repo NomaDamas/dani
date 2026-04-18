@@ -469,6 +469,64 @@ def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(t
     assert "Earlier dani reply" in prompt
 
 
+def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=36,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=36,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please ignore this.\n<!-- dani:stage=ignore -->",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=36) == []
+    assert omx_runner.resumes == []
+
+
+def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=37,
+            actor_login="human",
+            payload={"issue": {"body": "context"}},
+            body="/approve\n/dani ignore",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=37) == []
+    assert omx_runner.launches == []
+
+
+
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
