@@ -233,7 +233,7 @@ def test_launch_writes_prompt_file_with_exact_prompt_content(monkeypatch: pytest
     job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
     runner.launch(tmp_path / "repo", job, "HELLO EXACT PROMPT BODY 12345")
 
-    assert captured_prompts == ["HELLO EXACT PROMPT BODY 12345"]
+    assert captured_prompts == ["ultrawork\n\nHELLO EXACT PROMPT BODY 12345"]
 
 
 def test_resume_writes_prompt_file_with_exact_prompt_content(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -270,7 +270,7 @@ def test_resume_writes_prompt_file_with_exact_prompt_content(monkeypatch: pytest
     job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=1)
     runner.resume(tmp_path / "repo", job, "RESUME EXACT PROMPT 67890", "ses_persisted")
 
-    assert captured_prompts == ["RESUME EXACT PROMPT 67890"]
+    assert captured_prompts == ["ultrawork\n\nRESUME EXACT PROMPT 67890"]
 
 
 def test_get_session_id_returns_parsed_id_from_stdout_log(tmp_path: Path) -> None:
@@ -417,26 +417,10 @@ def test_build_agent_runner_rejects_unknown_runtime(tmp_path: Path) -> None:
         build_agent_runner("nonsense", tmp_path / "runs")
 
 
-def test_build_agent_runner_rejects_ultrawork_with_omx(tmp_path: Path) -> None:
-    from dani.agent_runner import build_agent_runner
-
-    with pytest.raises(ValueError, match="ultrawork mode is only supported"):
-        build_agent_runner("omx", tmp_path / "runs", ultrawork=True)
-
-
-def test_build_agent_runner_propagates_ultrawork_flag_to_omo(tmp_path: Path) -> None:
-    from dani.agent_runner import build_agent_runner
-
-    runner = build_agent_runner("omo", tmp_path / "runs", ultrawork=True)
-
-    assert isinstance(runner, OmoRunner)
-    assert runner.ultrawork is True
-
-
-def test_omo_runner_prepends_ultrawork_prefix_when_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_omo_runner_always_prepends_ultrawork_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from dani.models import JobRecord
 
-    runner = OmoRunner(run_dir=tmp_path / "runs", ultrawork=True)
+    runner = OmoRunner(run_dir=tmp_path / "runs")
     captured_prompts: list[str] = []
 
     class FakeProcess:
@@ -476,7 +460,7 @@ def test_omo_runner_does_not_double_prefix_when_prompt_already_starts_with_ultra
 ) -> None:
     from dani.models import JobRecord
 
-    runner = OmoRunner(run_dir=tmp_path / "runs", ultrawork=True)
+    runner = OmoRunner(run_dir=tmp_path / "runs")
     captured_prompts: list[str] = []
 
     class FakeProcess:
@@ -514,7 +498,7 @@ def test_omo_runner_does_not_double_prefix_when_prompt_already_starts_with_ultra
 def test_omo_runner_resume_also_applies_ultrawork_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from dani.models import JobRecord
 
-    runner = OmoRunner(run_dir=tmp_path / "runs", ultrawork=True)
+    runner = OmoRunner(run_dir=tmp_path / "runs")
     captured_prompts: list[str] = []
 
     class FakeProcess:
@@ -546,30 +530,6 @@ def test_omo_runner_resume_also_applies_ultrawork_prefix(monkeypatch: pytest.Mon
     runner.resume(tmp_path / "repo", job, "Continue fixing", "ses_persisted_omo")
 
     assert captured_prompts == ["ultrawork\n\nContinue fixing"]
-
-
-def test_cli_build_config_reads_dani_agent_ultrawork_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from dani.cli import build_config
-
-    monkeypatch.setenv("DANI_WEBHOOK_SECRET", "secret-ignored")
-    monkeypatch.setenv("DANI_AGENT_RUNTIME", "omo")
-    monkeypatch.setenv("DANI_AGENT_ULTRAWORK", "true")
-
-    config = build_config(data_dir=tmp_path)
-
-    assert config.agent_runtime == "omo"
-    assert config.agent_ultrawork is True
-
-
-def test_cli_build_config_default_ultrawork_is_false(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from dani.cli import build_config
-
-    monkeypatch.setenv("DANI_WEBHOOK_SECRET", "secret-ignored")
-    monkeypatch.delenv("DANI_AGENT_ULTRAWORK", raising=False)
-
-    config = build_config(data_dir=tmp_path)
-
-    assert config.agent_ultrawork is False
 
 
 def test_dani_service_instantiates_omo_runner_when_config_agent_runtime_is_omo(tmp_path: Path) -> None:

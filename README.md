@@ -33,10 +33,12 @@ Optional environment variables:
 - `DANI_AGENT_RUNTIME` — selects the agent backend. Accepted values:
   - `omx` / `oh-my-codex` / `codex` (default)
   - `omo` / `oh-my-openagents` / `oh-my-openagent` / `opencode`
-- `DANI_AGENT_ULTRAWORK` — set to `1` / `true` / `yes` / `on` to prefix every
-  opencode prompt with the `ultrawork` keyword, which activates
-  oh-my-openagents' ultrawork loop mode. Only valid when
-  `DANI_AGENT_RUNTIME=omo`; setting it with `omx` is rejected at startup.
+
+When `DANI_AGENT_RUNTIME=omo` is selected, dani automatically prefixes every
+opencode prompt with the `ultrawork` keyword so oh-my-openagents' ultrawork
+loop mode is always active, and runtime-specific prompt substitutions swap
+codex-only shell commands (`$ralph`, `$code-review`) for their opencode
+equivalents (ultrawork mode and the Momus-Plan-Critic subagent respectively).
 
 ## Codex/OMX trust prerequisite
 Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx exec 'hello'` or `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.

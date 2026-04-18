@@ -25,19 +25,12 @@ DEV_BRANCH_OPTION = typer.Option("dev", help="Development branch name.")
 def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> DaniConfig:
     secret = os.environ.get("DANI_WEBHOOK_SECRET", "")
     agent_runtime = os.environ.get("DANI_AGENT_RUNTIME", "omx")
-    agent_ultrawork = os.environ.get("DANI_AGENT_ULTRAWORK", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
     return DaniConfig(
         data_dir=data_dir,
         webhook_secret=secret,
         host=host,
         port=port,
         agent_runtime=agent_runtime,
-        agent_ultrawork=agent_ultrawork,
     )
 
 

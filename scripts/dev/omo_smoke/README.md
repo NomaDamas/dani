@@ -33,7 +33,7 @@ uv run python scripts/dev/omo_smoke/smoke_ultrawork.py
 |--------|--------|
 | `smoke_launch.py` | `OmoRunner.launch` actually spawns `opencode run --format json --dangerously-skip-permissions ...`, the model replies, and `_capture_session_id` extracts a valid `ses_...` id from the JSONL stream. |
 | `smoke_resume.py` | `OmoRunner.resume` runs `opencode run --session <id> ...` and opencode **continues** the prior conversation (recalls a keyword planted in phase 1). |
-| `smoke_ultrawork.py` | When `OmoRunner(ultrawork=True)`, the `prompt.txt` gets `"ultrawork\n\n"` prepended and opencode accepts it. |
+| `smoke_ultrawork.py` | `OmoRunner` always prepends `"ultrawork\n\n"` to `prompt.txt` and opencode accepts it. |
 
 ## Why these are not part of `pytest` by default
 

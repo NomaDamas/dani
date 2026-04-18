@@ -25,7 +25,7 @@ and is skipped by default because it consumes model tokens.
 |---|---|---|
 | `smoke_launch.py` | `OmoRunner.launch` spawns opencode, gets back `{"type":"text","text":"dani omo smoke ok"}`, sessionID captured. | `ses_25e9164e7ffeleSyF3UGalrfuo` |
 | `smoke_resume.py` | `OmoRunner.resume` runs `opencode run --session <id>` and opencode **remembers** a keyword planted in phase 1 (`PURPLE_HIPPO_9182`). | `ses_25e99ee42ffeZiayJpmLNjDbBQ` |
-| `smoke_ultrawork.py` | With `ultrawork=True`, `prompt.txt` gets prefixed with `"ultrawork\n\n"` and real opencode accepts it. | `ses_25e919f1cffe7LPKpAR04SCyNQ` |
+| `smoke_ultrawork.py` | `OmoRunner` unconditionally prefixes `prompt.txt` with `"ultrawork\n\n"` and real opencode accepts it. | `ses_25e919f1cffe7LPKpAR04SCyNQ` |
 
 All three scripts passed their assertions when executed locally with
 `uv run python scripts/dev/omo_smoke/<name>.py` against `opencode` 1.4.11 on

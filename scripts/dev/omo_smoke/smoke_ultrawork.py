@@ -26,8 +26,8 @@ def ensure_repo() -> None:
 
 def main() -> int:
     ensure_repo()
-    runner = build_agent_runner("omo", RUN_DIR, ultrawork=True)
-    print(f"[smoke-ulw] runner={type(runner).__name__} ultrawork={runner.ultrawork}")
+    runner = build_agent_runner("omo", RUN_DIR)
+    print(f"[smoke-ulw] runner={type(runner).__name__}")
 
     job = JobRecord(repo_full_name="acme/smoke", stage="issue_request", issue_number=777)
     prompt = (

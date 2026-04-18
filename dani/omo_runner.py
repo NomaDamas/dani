@@ -28,20 +28,17 @@ class OmoRunner:
         self,
         run_dir: Path,
         opencode_bin: str = OPENCODE_BIN,
-        *,
-        ultrawork: bool = False,
     ) -> None:
         self.run_dir = run_dir
         self.opencode_bin = opencode_bin
-        self.ultrawork = ultrawork
         self._processes: dict[str, tuple[ManagedProcess, TextIO, TextIO]] = {}
         self._lock = threading.RLock()
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
     def _decorated_prompt(self, prompt: str) -> str:
-        if self.ultrawork and not prompt.lstrip().lower().startswith("ultrawork"):
-            return f"{ULTRAWORK_PROMPT_PREFIX}{prompt}"
-        return prompt
+        if prompt.lstrip().lower().startswith("ultrawork"):
+            return prompt
+        return f"{ULTRAWORK_PROMPT_PREFIX}{prompt}"
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         session_dir, prompt_path, script_path, stdout_path, stderr_path, handle = self._prepare_session_files(job)

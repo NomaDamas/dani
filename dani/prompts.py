@@ -227,7 +227,18 @@ After the push succeeds, exit.
 }
 
 
-def render_prompt(template_name: str, context: dict[str, Any]) -> str:
+# omx uses codex shell-slash commands ($ralph, $code-review); omo (opencode)
+# has neither, so the equivalent intents are swapped in post-render: ralph loop
+# -> ultrawork mode (always-on for omo), $code-review -> Momus-Plan-Critic subagent.
+_RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "omo": (
+        ("$code-review", "the Momus-Plan-Critic subagent for rigorous verification"),
+        ("$ralph", "ultrawork"),
+    ),
+}
+
+
+def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "omx") -> str:
     template = TEMPLATES[template_name]
     context = dict(context)
     context.setdefault("review_cycle", "")
@@ -238,4 +249,9 @@ def render_prompt(template_name: str, context: dict[str, Any]) -> str:
             **context,
             "signature": build_signature(stage=template_name, job_id=context.get("job_id", "unknown")),
         }
-    return template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
+    rendered = template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
+    substitutions = _RUNTIME_SUBSTITUTIONS.get((runtime or "omx").strip().lower())
+    if substitutions:
+        for needle, replacement in substitutions:
+            rendered = rendered.replace(needle, replacement)
+    return rendered

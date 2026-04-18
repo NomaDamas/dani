@@ -51,18 +51,15 @@ class AgentRunner(Protocol):
     def get_session_id(self, runtime_handle: str) -> str | None: ...
 
 
-def build_agent_runner(runtime: str, run_dir: Path, *, ultrawork: bool = False) -> AgentRunner:
+def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
     """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``)."""
     from dani.omo_runner import OmoRunner
     from dani.omx_runner import OmxRunner
 
     normalized = (runtime or "omx").strip().lower()
     if normalized in {"omx", "oh-my-codex", "codex"}:
-        if ultrawork:
-            msg = "ultrawork mode is only supported with the 'omo' agent runtime"
-            raise ValueError(msg)
         return OmxRunner(run_dir)
     if normalized in {"omo", "oh-my-openagents", "oh-my-openagent", "opencode"}:
-        return OmoRunner(run_dir, ultrawork=ultrawork)
+        return OmoRunner(run_dir)
     msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
     raise ValueError(msg)

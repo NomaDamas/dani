@@ -44,7 +44,6 @@ class DaniService:
         self.omx_runner: AgentRunner = omx_runner or build_agent_runner(
             config.agent_runtime,
             config.run_dir,
-            ultrawork=config.agent_ultrawork,
         )
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
         self.queue_manager = RepoQueueManager(self._run_job)
@@ -540,6 +539,7 @@ class DaniService:
                     "temp_branch": conflict_context.temp_branch,
                     "commit_message": self.dev_syncer.build_commit_message(repo, job),
                 },
+                runtime=self.config.agent_runtime,
             )
             session = self.omx_runner.launch(conflict_context.worktree_path, job, prompt)
             self.storage.create_session(session)
@@ -655,6 +655,7 @@ class DaniService:
                 "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_implementation_prompt(
@@ -717,6 +718,7 @@ class DaniService:
                 "signature": signature,
                 "signature_instructions": signature_instructions,
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_issue_followup_prompt(
@@ -738,6 +740,7 @@ class DaniService:
                 "comment_body": job.metadata.get("comment_body", ""),
                 "signature": build_signature(stage="issue_followup", job=job.id, issue=issue_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_review_round_prompt(
@@ -782,6 +785,7 @@ class DaniService:
                 ),
                 "signature": build_signature(**signature_fields),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_merge_conflict_resolution_prompt(
@@ -807,6 +811,7 @@ class DaniService:
                 "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
                 "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_final_verdict_prompt(
@@ -841,6 +846,7 @@ class DaniService:
                 ),
                 "reject_signature": build_signature(stage="final_verdict", job=job.id, pr=pr_number, verdict="REJECT"),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_human_escalation_prompt(
@@ -869,6 +875,7 @@ class DaniService:
                 "review_limit": self.config.external_review_limit,
                 "signature": build_signature(stage="human_escalation", job=job.id, pr=pr_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:

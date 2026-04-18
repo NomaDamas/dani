@@ -121,7 +121,7 @@ def test_live_opencode_resume_continues_prior_session(tmp_path: Path, live_repo:
 
 
 def test_live_opencode_ultrawork_prefix_accepted(tmp_path: Path, live_repo: Path) -> None:
-    runner = OmoRunner(run_dir=tmp_path / "runs", ultrawork=True)
+    runner = OmoRunner(run_dir=tmp_path / "runs")
     job_cls = _import_job_record()
     job = job_cls(repo_full_name="live/demo", stage="issue_request", issue_number=3)
 
