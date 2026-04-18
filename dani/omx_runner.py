@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, TextIO
 from uuid import uuid4
 
+from dani.errors import check_rollout_missing_error, check_transient_capacity_error
 from dani.models import JobRecord, SessionRecord
 
 
@@ -43,7 +44,13 @@ class OmxRunner:
         script_path.chmod(0o755)
         stdout_file = stdout_path.open("w", encoding="utf-8")
         stderr_file = stderr_path.open("w", encoding="utf-8")
-        process = subprocess.Popen([str(script_path)], stdout=stdout_file, stderr=stderr_file)  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
+            [str(script_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
         omx_session_id = None
@@ -82,7 +89,13 @@ class OmxRunner:
         script_path.chmod(0o755)
         stdout_file = stdout_path.open("w", encoding="utf-8")
         stderr_file = stderr_path.open("w", encoding="utf-8")
-        process = subprocess.Popen([str(script_path)], stdout=stdout_file, stderr=stderr_file)  # noqa: S603
+        process = subprocess.Popen(  # noqa: S603
+            [str(script_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
         return SessionRecord(
@@ -134,6 +147,16 @@ class OmxRunner:
         except subprocess.TimeoutExpired as exc:
             msg = f"omx exec process did not exit before timeout: {runtime_handle}"
             raise TimeoutError(msg) from exc
+
+        self._check_stderr_for_transient_error(runtime_handle)
+
+    def _check_stderr_for_transient_error(self, runtime_handle: str) -> None:
+        stderr_path = self.run_dir / runtime_handle / "stderr.log"
+        if not stderr_path.exists():
+            return
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        check_rollout_missing_error(stderr_text)
+        check_transient_capacity_error(stderr_text)
 
     def close_session(self, runtime_handle: str) -> None:
         with self._lock:

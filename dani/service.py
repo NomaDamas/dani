@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import contextlib
+import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
-from dani.github import GitHubCLI
+from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
 from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
 IMPLEMENTING_LABEL = "Implementing"
+
+RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
+
+logger = logging.getLogger(__name__)
 
 
 class DaniService:
@@ -69,6 +77,26 @@ class DaniService:
     def state_snapshot(self) -> dict[str, Any]:
         return self.storage.snapshot()
 
+    def restart_issue(self, repo_full_name: str, issue_number: int) -> JobRecord:
+        repo = self.storage.get_repo(repo_full_name)
+        if repo is None:
+            msg = f"missing_repo: {repo_full_name}"
+            raise RuntimeError(msg)
+
+        for job in self.storage.find_jobs(repo_full_name=repo_full_name, issue_number=issue_number):
+            self.storage.update_job(job.id, status="superseded")
+
+        issue_metadata = self._issue_metadata(repo_full_name, issue_number)
+        return self._enqueue_job(
+            repo,
+            stage="issue_request",
+            issue_number=issue_number,
+            metadata={
+                "title": issue_metadata.get("title", f"Issue #{issue_number}"),
+                "body": issue_metadata.get("body", ""),
+            },
+        )
+
     def handle_event(self, event: NormalizedEvent) -> dict[str, Any]:
         self.storage.append_event({
             "repo_full_name": event.repo_full_name,
@@ -87,6 +115,9 @@ class DaniService:
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None or not repo.enabled:
             return {"status": "ignored", "reason": "unregistered_repo"}
+
+        if event.kind in {"issue_comment", "pull_request_comment"} and is_opt_out_comment(event.body):
+            return {"status": "ignored", "reason": "comment_opt_out"}
 
         signature = parse_signature(event.body or "")
         if signature and event.kind != "pull_request_opened":
@@ -115,48 +146,120 @@ class DaniService:
             return self._handle_review_round_event(event, signature)
 
         if stage == "implementation" and event.kind == "pull_request_comment":
-            pr_number = int(signature.get("pr") or event.number)
-            event_key = self._agent_event_key(signature, default_pr=pr_number)
-            if not self.storage.record_processed_event(event_key):
-                return {"status": "ignored", "reason": "duplicate_agent_event"}
-            repo = self.storage.get_repo(event.repo_full_name)
-            if repo is None:
-                return {"status": "ignored", "reason": "missing_repo"}
-            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
-            latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
-            pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
-            if latest_review_round >= self.config.review_rounds:
-                verdict_job = self._enqueue_job(
-                    repo,
-                    stage="final_verdict",
-                    issue_number=issue_number,
-                    pr_number=pr_number,
-                    metadata={
-                        **pr_metadata,
-                        "title": (pr_metadata.get("title") or event.title or ""),
-                    },
-                )
-                return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+            return self._handle_implementation_agent_event(event, signature)
 
-            next_round = max(latest_review_round + 1, 1)
-            review_job = self._enqueue_job(
+        if stage == "merge_conflict_resolution":
+            return self._handle_merge_conflict_resolution_agent_event(event, signature)
+
+        if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
+            return self._handle_final_verdict_agent_event(event, signature)
+
+        return {"status": "updated", "stage": stage}
+
+    def _handle_implementation_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        pr_number = int(signature.get("pr") or event.number)
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
+        latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        if latest_review_round >= self.config.review_rounds:
+            verdict_job = self._enqueue_job(
                 repo,
-                stage="review_round",
+                stage="final_verdict",
                 issue_number=issue_number,
                 pr_number=pr_number,
-                review_round=next_round,
                 metadata={
                     **pr_metadata,
                     "title": (pr_metadata.get("title") or event.title or ""),
                 },
             )
-            return {"status": "queued", "job_id": review_job.id, "stage": review_job.stage}
+            return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
 
-        if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
-            self.github.merge_pull_request(event.repo_full_name, int(signature["pr"]))
-            return {"status": "merged", "pr_number": int(signature["pr"])}
+        next_round = max(latest_review_round + 1, 1)
+        review_job = self._enqueue_job(
+            repo,
+            stage="review_round",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            review_round=next_round,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+            },
+        )
+        return {"status": "queued", "job_id": review_job.id, "stage": review_job.stage}
 
-        return {"status": "updated", "stage": stage}
+    def _handle_merge_conflict_resolution_agent_event(
+        self, event: NormalizedEvent, signature: dict[str, str]
+    ) -> dict[str, Any]:
+        pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if not self.storage.record_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        repo = self.storage.get_repo(event.repo_full_name)
+        if repo is None:
+            return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
+        pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            issue_number = self._extract_issue_number(pr_metadata.get("body"))
+        verdict_job = self._enqueue_job(
+            repo,
+            stage="final_verdict",
+            issue_number=issue_number,
+            pr_number=pr_number,
+            metadata={
+                **pr_metadata,
+                "title": (pr_metadata.get("title") or event.title or ""),
+            },
+        )
+        return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
+
+    def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
+        pr_number = int(signature["pr"])
+        event_key = self._agent_event_key(signature, default_pr=pr_number)
+        if self.storage.has_processed_event(event_key):
+            return {"status": "ignored", "reason": "duplicate_agent_event"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
+        try:
+            self.github.merge_pull_request(event.repo_full_name, pr_number)
+        except MergeConflictError as exc:
+            repo = self.storage.get_repo(event.repo_full_name)
+            if repo is None:
+                return {"status": "ignored", "reason": "missing_repo"}
+            pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+            issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+            if issue_number is None:
+                issue_number = self._extract_issue_number(pull_request.get("body"))
+            merge_conflict_job = self._enqueue_job(
+                repo,
+                stage="merge_conflict_resolution",
+                issue_number=issue_number,
+                pr_number=pr_number,
+                metadata={
+                    "title": pull_request.get("title") or event.title or f"PR #{pr_number}",
+                    "body": pull_request.get("body") or "",
+                    "head_branch": self._branch_ref(pull_request, "head"),
+                    "base_branch": self._branch_ref(pull_request, "base"),
+                    "conflict_reason": str(exc),
+                },
+            )
+            self.storage.record_processed_event(event_key)
+            return {"status": "queued", "job_id": merge_conflict_job.id, "stage": merge_conflict_job.stage}
+        self.storage.record_processed_event(event_key)
+        return {"status": "merged", "pr_number": pr_number}
 
     def _handle_review_round_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         event_key = self._agent_event_key(signature, default_pr=event.number if event.is_pull_request else None)
@@ -165,10 +268,14 @@ class DaniService:
         review_round = int(signature["round"])
         pr_number = int(signature["pr"])
         issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         source_job = self.storage.get_job(signature.get("job", ""))
         repo = self.storage.get_repo(event.repo_full_name)
         if repo is None:
             return {"status": "ignored", "reason": "missing_repo"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
         if bool(source_job and source_job.metadata.get("external_contribution")):
             return self._handle_external_review_round_event(
@@ -180,6 +287,10 @@ class DaniService:
                 pr_number=pr_number,
                 review_round=review_round,
             )
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
+        if not self._is_pr_open(event.repo_full_name, pr_number):
+            return {"status": "ignored", "reason": "pr_not_open"}
         next_job = self._enqueue_job(
             repo,
             stage="implementation",
@@ -263,32 +374,138 @@ class DaniService:
         return job
 
     def _run_job(self, job: JobRecord) -> None:
+        stored_job = self.storage.get_job(job.id)
+        if stored_job is not None and stored_job.status == "superseded":
+            job.status = "superseded"
+            return
+
         repo = self.storage.get_repo(job.repo_full_name)
         if repo is None:
             self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": "missing repo"})
+            job.status = "failed"
             return
 
         if job.stage == "dev_sync":
             self._run_dev_sync_job(repo, job)
             return
 
-        session = None
-        try:
-            prompt = self._build_prompt(repo, job)
-            if job.stage == "issue_followup":
-                session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
+        retry_history: list[dict[str, str]] = list(job.metadata.get("retry_history", []))
+        max_attempts = len(RETRY_BACKOFF_SECONDS) + 1
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._run_job_attempt(repo, job)
+            except TransientCapacityError as exc:
+                if self._handle_transient_failure(repo, job, exc, attempt, max_attempts, retry_history):
+                    return
+            except Exception as exc:
+                self._handle_job_failure(job, exc, attempt, retry_history)
+                job.status = "failed"
+                return
             else:
-                session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
-            self.storage.create_session(session)
-            self.storage.update_job(job.id, status="launched", session_id=session.id)
+                self.storage.update_job(
+                    job.id,
+                    status="completed",
+                    metadata={**job.metadata, "retry_attempts": attempt - 1, "retry_history": retry_history},
+                )
+                job.status = "completed"
+                return
+
+    def _run_job_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
+        prompt = self._build_prompt(repo, job)
+        if job.stage == "issue_followup":
+            session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
+        else:
+            session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
+        self.storage.create_session(session)
+        self.storage.update_job(job.id, status="launched", session_id=session.id)
+        try:
             self.omx_runner.wait(session.runtime_handle)
             self._verify_side_effect(repo, job)
-            self._finalize_session(session, status="completed", termination_reason="completed")
-            self.storage.update_job(job.id, status="completed")
-        except Exception as exc:
-            if session is not None:
-                self._finalize_session(session, status="failed", termination_reason=type(exc).__name__)
-            self.storage.update_job(job.id, status="failed", metadata={**job.metadata, "error": str(exc)})
+        except Exception:
+            self._finalize_session(session, status="failed", termination_reason="failed")
+            raise
+        self._finalize_session(session, status="completed", termination_reason="completed")
+
+    def _handle_transient_failure(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        exc: TransientCapacityError,
+        attempt: int,
+        max_attempts: int,
+        retry_history: list[dict[str, str]],
+    ) -> bool:
+        """Handle a transient capacity error. Return True if the job is terminal (done or exhausted)."""
+        # If the side effect was already posted before the capacity error,
+        # treat the job as completed to avoid duplicate GitHub comments/PRs.
+        side_effect_exists = False
+        with contextlib.suppress(Exception):
+            self._verify_side_effect(repo, job)
+            side_effect_exists = True
+        if side_effect_exists:
+            self.storage.update_job(
+                job.id,
+                status="completed",
+                metadata={
+                    **job.metadata,
+                    "retry_attempts": attempt - 1,
+                    "retry_history": retry_history,
+                    "note": "side_effect_already_posted",
+                },
+            )
+            job.status = "completed"
+            return True
+        retry_history.append({
+            "attempt": str(attempt),
+            "reason": "transient_capacity",
+            "pattern": exc.pattern,
+            "at": utc_now(),
+        })
+        if attempt >= max_attempts:
+            logger.warning("Job %s exhausted all %d retry attempts", job.id, max_attempts)
+            self.storage.update_job(
+                job.id,
+                status="failed",
+                metadata={
+                    **job.metadata,
+                    "error": f"retry_exhausted: {exc}",
+                    "retry_exhausted": True,
+                    "retry_attempts": attempt,
+                    "retry_history": retry_history,
+                },
+            )
+            job.status = "failed"
+            return True
+        backoff = RETRY_BACKOFF_SECONDS[attempt - 1]
+        logger.info("Job %s attempt %d hit transient capacity error, retrying in %ds", job.id, attempt, backoff)
+        self.storage.update_job(
+            job.id,
+            status="retrying",
+            metadata={**job.metadata, "retry_attempts": attempt, "retry_history": retry_history},
+        )
+        time.sleep(backoff)
+        return False
+
+    def _handle_job_failure(
+        self,
+        job: JobRecord,
+        exc: Exception,
+        attempt: int,
+        retry_history: list[dict[str, str]],
+    ) -> None:
+        metadata = {
+            **job.metadata,
+            "error": str(exc),
+            "retry_attempts": attempt - 1,
+            "retry_history": retry_history,
+        }
+        if self._is_rollout_missing_error(exc):
+            metadata["error"] = "rollout_missing"
+            metadata["error_detail"] = str(exc)
+            with contextlib.suppress(Exception):
+                self._post_session_lost_warning(job)
+        self.storage.update_job(job.id, status="failed", metadata=metadata)
 
     def _run_dev_sync_job(self, repo: RepoConfig, job: JobRecord) -> None:
         session = None
@@ -380,6 +597,9 @@ class DaniService:
         if job.stage == "human_escalation":
             return self._build_human_escalation_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
 
+        if job.stage == "merge_conflict_resolution":
+            return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+
         return self._build_final_verdict_prompt(job, issue_number, pr_number, pr_title, pr_body)
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -397,6 +617,9 @@ class DaniService:
             return
         if job.stage == "human_escalation":
             self._verify_human_escalation_side_effect(repo, job)
+            return
+        if job.stage == "merge_conflict_resolution":
+            self._verify_merge_conflict_resolution_side_effect(repo, job)
             return
         if job.stage == "final_verdict":
             self._verify_final_verdict_side_effect(repo, job)
@@ -417,6 +640,7 @@ class DaniService:
                 "issue_number": issue_number,
                 "issue_title": issue_title,
                 "issue_body": issue_body,
+                "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
         )
@@ -548,6 +772,31 @@ class DaniService:
             },
         )
 
+    def _build_merge_conflict_resolution_prompt(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        issue_number: int,
+        pr_number: int,
+        pr_title: str,
+        pr_body: str,
+    ) -> str:
+        return render_prompt(
+            "merge_conflict_resolution",
+            {
+                "repo": repo.full_name,
+                "local_path": repo.local_path,
+                "issue_number": issue_number,
+                "pr_number": pr_number,
+                "pr_title": pr_title,
+                "pr_body": pr_body,
+                "head_branch": job.metadata.get("head_branch", ""),
+                "base_branch": job.metadata.get("base_branch", repo.dev_branch),
+                "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
+                "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
+            },
+        )
+
     def _build_final_verdict_prompt(
         self,
         job: JobRecord,
@@ -611,12 +860,13 @@ class DaniService:
         )
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        if self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue") is None:
+        signature = build_signature(stage="issue_request", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-request-comment-missing")
 
     def _verify_issue_followup_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        latest_comment = self.github.latest_signature_comment(repo.full_name, int(job.issue_number or 0), kind="issue")
-        if latest_comment is None or latest_comment[1].get("stage") != "issue_followup":
+        signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-followup-comment-missing")
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -649,6 +899,11 @@ class DaniService:
         if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
             raise RuntimeError("review-comment-missing")
 
+    def _verify_merge_conflict_resolution_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        signature = build_signature(stage="merge_conflict_resolution", job=job.id, pr=int(job.pr_number or 0))
+        if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
+            raise RuntimeError("merge-conflict-comment-missing")
+
     def _verify_final_verdict_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         approve_signature = build_signature(
             stage="final_verdict",
@@ -678,6 +933,13 @@ class DaniService:
             self.github.find_comments_by_signature(repo_full_name, pr_number, kind="pr", signature_fragment=signature)
         )
 
+    def _has_exact_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> bool:
+        return bool(
+            self.github.find_comments_by_signature(
+                repo_full_name, issue_number, kind="issue", signature_fragment=signature
+            )
+        )
+
     def _is_approve_comment(self, body: str | None) -> bool:
         return bool(body and "/approve" in body.lower())
 
@@ -688,6 +950,14 @@ class DaniService:
         if match is None:
             return None
         return int(match.group("number"))
+
+    def _branch_ref(self, payload: dict[str, Any], key: str) -> str | None:
+        ref_payload = payload.get(key)
+        if isinstance(ref_payload, dict):
+            ref = ref_payload.get("ref")
+            if isinstance(ref, str) and ref:
+                return ref
+        return None
 
     def _queue_issue_request(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         job = self._enqueue_job(
@@ -784,6 +1054,8 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
         return self._queue_external_pull_request_review(
             repo,
             event,
@@ -795,7 +1067,7 @@ class DaniService:
         repo: RepoConfig,
         event: NormalizedEvent,
         *,
-        issue_number: int | None,
+        issue_number: int,
     ) -> dict[str, Any]:
         event_key = self._external_pull_request_event_key(event)
         if not self.storage.record_processed_event(event_key):
@@ -957,6 +1229,10 @@ class DaniService:
                 }
         return {}
 
+    def _is_pr_open(self, repo_full_name: str, pr_number: int) -> bool:
+        pull_request = self.github.get_pull_request(repo_full_name, pr_number)
+        return pull_request.get("state") == "open"
+
     def _pull_request_metadata(self, repo_full_name: str, pr_number: int) -> dict[str, str]:
         for pull_request in self.github.list_pull_requests(repo_full_name):
             if int(pull_request.get("number", 0)) != pr_number:
@@ -977,3 +1253,44 @@ class DaniService:
             author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
             rendered.append(f"[{author}]\n{body}")
         return "\n\n".join(rendered)
+
+    def _render_issue_discussion(self, repo_full_name: str, issue_number: int, *, limit: int = 8) -> str:
+        comments = self.github.issue_comments(repo_full_name, issue_number)
+        rendered: list[str] = []
+        for comment in comments[-limit:]:
+            body = str(comment.get("body") or "").strip()
+            if not body:
+                continue
+            author = comment.get("user", {}).get("login") or comment.get("author", {}).get("login") or "unknown"
+            rendered.append(f"[{author}]\n{body}")
+        return "\n\n".join(rendered)
+
+    def _is_rollout_missing_error(self, exc: Exception) -> bool:
+        if isinstance(exc, RolloutMissingError):
+            return True
+        error_text = str(exc)
+        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+
+    def _post_session_lost_warning(self, job: JobRecord) -> None:
+        if job.stage != "issue_followup" or job.issue_number is None:
+            return
+        event_key = f"repo={job.repo_full_name};stage=session_lost;issue={job.issue_number}"
+        signature = build_signature(stage="session_lost", issue=job.issue_number)
+        if self.github.find_comments_by_signature(
+            job.repo_full_name,
+            job.issue_number,
+            kind="issue",
+            signature_fragment=signature,
+        ):
+            if not self.storage.has_processed_event(event_key):
+                self.storage.record_processed_event(event_key)
+            return
+        if self.storage.has_processed_event(event_key):
+            return
+        body = (
+            "⚠️ dani 세션 기록이 유실되어 이전 대화를 이어갈 수 없습니다. "
+            f"`dani restart-issue {job.repo_full_name} {job.issue_number}` 로 새 세션을 시작해 주세요.\n\n"
+            f"{signature}"
+        )
+        self.github.create_issue_comment(job.repo_full_name, job.issue_number, body)
+        self.storage.record_processed_event(event_key)

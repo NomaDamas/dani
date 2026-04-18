@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from typing import Any
 
 from github import Auth, Github
-from github.GithubException import UnknownObjectException
+from github.GithubException import GithubException, UnknownObjectException
 
-from dani.signatures import parse_signature
+from dani.signatures import is_opt_out_comment, parse_agent_signature
 
 TOKEN_ENV_VARS = ("DANI_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT")
+LOGGER = logging.getLogger(__name__)
+MERGE_CONFLICT_STATUSES = frozenset({405, 409, 422})
 IMPLEMENTING_LABEL_COLOR = "FBCA04"
 IMPLEMENTING_LABEL_DESCRIPTION = "Implementation has started for this issue."
+
+
+class MergeConflictError(RuntimeError):
+    def __init__(
+        self, repo_full_name: str, pr_number: int, *, status: int | None = None, message: str | None = None
+    ) -> None:
+        self.repo_full_name = repo_full_name
+        self.pr_number = pr_number
+        self.status = status
+        self.message = message or "Pull request merge failed because the branch is out of date or has conflicts."
+        super().__init__(self.message)
 
 
 class GitHubCLI:
@@ -61,6 +75,9 @@ class GitHubCLI:
     def list_pull_requests(self, repo_full_name: str) -> list[dict[str, Any]]:
         return [pull_request.raw_data for pull_request in self._repo(repo_full_name).get_pulls(state="open")]
 
+    def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
+        return self._repo(repo_full_name).get_pull(pr_number).raw_data
+
     def find_pr_by_signature(self, repo_full_name: str, signature_fragment: str) -> dict[str, Any] | None:
         for pull_request in self.list_pull_requests(repo_full_name):
             if signature_fragment in (pull_request.get("body") or ""):
@@ -74,7 +91,9 @@ class GitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
@@ -85,7 +104,11 @@ class GitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
         issue = self._repo(repo_full_name).get_issue(issue_number)
@@ -130,4 +153,19 @@ class GitHubCLI:
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
-        pull_request.merge(merge_method="merge", delete_branch=True)
+        try:
+            merge_status = pull_request.merge(merge_method="merge", delete_branch=False)
+        except GithubException as exc:
+            if exc.status in MERGE_CONFLICT_STATUSES:
+                raise MergeConflictError(repo_full_name, pr_number, status=exc.status, message=str(exc)) from exc
+            raise
+        if not merge_status.merged:
+            raise MergeConflictError(repo_full_name, pr_number, message=merge_status.message)
+        try:
+            pull_request.delete_branch()
+        except Exception:
+            LOGGER.warning(
+                "Pull request merged but failed to delete head branch",
+                extra={"repo_full_name": repo_full_name, "pr_number": pr_number},
+                exc_info=True,
+            )

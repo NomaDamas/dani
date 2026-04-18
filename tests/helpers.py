@@ -4,9 +4,13 @@ import re
 from pathlib import Path
 from typing import Any, TypedDict
 
+from dani.errors import TransientCapacityError
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
+from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
-from dani.signatures import build_signature, parse_signature
+from dani.signatures import build_signature, is_opt_out_comment, parse_agent_signature, parse_signature
+
+_CAPACITY_MSG = "capacity"
 
 
 class FakeGitHubCLI:
@@ -16,6 +20,7 @@ class FakeGitHubCLI:
         self.prs: dict[str, list[dict[str, Any]]] = {}
         self.open_issues: dict[str, list[dict[str, Any]]] = {}
         self.merged: list[tuple[str, int]] = []
+        self.merge_conflicts: set[tuple[str, int]] = set()
         self.issue_labels: dict[tuple[str, int], list[str]] = {}
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
@@ -36,6 +41,19 @@ class FakeGitHubCLI:
                 return pull_request
         return None
 
+    def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
+        for pull_request in self.list_pull_requests(repo_full_name):
+            if pull_request.get("number") == pr_number:
+                return dict(pull_request)
+        return {
+            "number": pr_number,
+            "title": f"PR #{pr_number}",
+            "body": "",
+            "state": "open",
+            "head": {"ref": f"Feature/#{pr_number}"},
+            "base": {"ref": "dev"},
+        }
+
     def latest_signature_comment(
         self, repo_full_name: str, number: int, *, kind: str
     ) -> tuple[dict[str, Any], dict[str, str]] | None:
@@ -43,7 +61,9 @@ class FakeGitHubCLI:
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
         for comment in reversed(comments):
-            parsed = parse_signature(comment.get("body", ""))
+            if is_opt_out_comment(comment.get("body", "")):
+                continue
+            parsed = parse_agent_signature(comment.get("body", ""))
             if parsed is not None:
                 return comment, parsed
         return None
@@ -54,9 +74,15 @@ class FakeGitHubCLI:
         comments = (
             self.issue_comments(repo_full_name, number) if kind == "issue" else self.pr_comments(repo_full_name, number)
         )
-        return [comment for comment in comments if signature_fragment in (comment.get("body") or "")]
+        return [
+            comment
+            for comment in comments
+            if not is_opt_out_comment(comment.get("body", "")) and signature_fragment in (comment.get("body") or "")
+        ]
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        if (repo_full_name, pr_number) in self.merge_conflicts:
+            raise MergeConflictError(repo_full_name, pr_number, status=409, message="merge conflict with base branch")
         self.merged.append((repo_full_name, pr_number))
 
     def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
@@ -70,8 +96,40 @@ class FakeGitHubCLI:
     def add_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> None:
         self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append({"body": signature})
 
-    def add_pull_request(self, repo_full_name: str, pr_number: int, signature: str) -> None:
-        self.prs.setdefault(repo_full_name, []).append({"number": pr_number, "body": signature})
+    def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append(comment)
+        return comment
+
+    def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
+        comment = {"body": body}
+        self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append(comment)
+        return comment
+
+    def add_pull_request(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        body: str,
+        *,
+        title: str | None = None,
+        head_branch: str | None = None,
+        base_branch: str = "dev",
+    ) -> None:
+        self.prs.setdefault(repo_full_name, []).append({
+            "number": pr_number,
+            "title": title or f"Feature/#{pr_number}",
+            "body": body,
+            "state": "open",
+            "head": {"ref": head_branch or f"Feature/#{pr_number}"},
+            "base": {"ref": base_branch},
+        })
+
+    def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        for pr in self.prs.get(repo_full_name, []):
+            if pr.get("number") == pr_number:
+                pr["state"] = "closed"
+                return
 
 
 class LaunchRecord(TypedDict):
@@ -93,60 +151,24 @@ class FakeOmxRunner:
         self.launches: list[LaunchRecord] = []
         self.resumes: list[ResumeRecord] = []
         self.closed_sessions: list[str] = []
+        self._transient_failures_remaining: int = 0
+        self.resume_error: Exception | None = None
+
+    def set_transient_failures(self, count: int) -> None:
+        """Configure the runner to raise TransientCapacityError for the next *count* wait() calls."""
+        self._transient_failures_remaining = count
+
+    def set_resume_failure(self, exc: Exception) -> None:
+        self.resume_error = exc
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         repo_full_name = job.repo_full_name
         matches = re.findall(r"<!--\s*dani:([^>]+)\s*-->", prompt)
-        signature = None
-        if matches:
-            signature = parse_signature(f"<!-- dani:{matches[-1]} -->")
-        if job.stage == "issue_request":
-            issue_number = int((signature or {}).get("issue", job.issue_number or 0))
-            self.github.add_issue_signature(
-                repo_full_name,
-                issue_number,
-                build_signature(stage="issue_request", job=job.id, issue=issue_number),
-            )
-        elif job.stage == "implementation":
-            issue_number = int((signature or {}).get("issue", job.issue_number or 0))
-            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
-            if pr_number:
-                signature_fields: dict[str, Any] = {"stage": "implementation", "job": job.id, "pr": pr_number}
-                if issue_number:
-                    signature_fields["issue"] = issue_number
-                self.github.add_pr_signature(
-                    repo_full_name,
-                    pr_number,
-                    build_signature(**signature_fields),
-                )
-            else:
-                signature_fields: dict[str, Any] = {"stage": "implementation", "job": job.id}
-                if issue_number:
-                    signature_fields["issue"] = issue_number
-                self.github.add_pull_request(repo_full_name, 101, build_signature(**signature_fields))
-        elif job.stage == "review_round":
-            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
-            self.github.add_pr_signature(
-                repo_full_name,
-                pr_number,
-                build_signature(stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1),
-            )
-        elif job.stage == "human_escalation":
-            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
-            self.github.add_pr_signature(
-                repo_full_name,
-                pr_number,
-                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
-            )
-        elif job.stage == "dev_sync":
-            pass
-        else:
-            self.github.add_pr_signature(
-                repo_full_name,
-                job.pr_number or 0,
-                build_signature(stage="final_verdict", job=job.id, pr=job.pr_number or 0, verdict="APPROVE"),
-            )
-
+        signature = parse_signature(f"<!-- dani:{matches[-1]} -->") if matches else None
+        # If next wait() will raise TransientCapacityError, skip posting side effects
+        # to simulate the OMX session failing before it could post anything.
+        if self._transient_failures_remaining == 0:
+            self._post_side_effect(repo_full_name, job, signature)
         self.launches.append({"repo_path": str(repo_path), "job": job, "prompt": prompt})
         return SessionRecord(
             repo_full_name=repo_full_name,
@@ -162,7 +184,58 @@ class FakeOmxRunner:
             omx_session_id=f"omx-{job.id}",
         )
 
+    def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
+        if job.stage == "issue_request":
+            issue_number = int((signature or {}).get("issue", job.issue_number or 0))
+            self.github.add_issue_signature(
+                repo_full_name,
+                issue_number,
+                build_signature(stage="issue_request", job=job.id, issue=issue_number),
+            )
+        elif job.stage == "implementation":
+            issue_number = int((signature or {}).get("issue", job.issue_number or 0))
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            if pr_number:
+                fields: dict[str, Any] = {"stage": "implementation", "job": job.id, "pr": pr_number}
+                if issue_number:
+                    fields["issue"] = issue_number
+                self.github.add_pr_signature(repo_full_name, pr_number, build_signature(**fields))
+            else:
+                fields = {"stage": "implementation", "job": job.id}
+                if issue_number:
+                    fields["issue"] = str(issue_number)
+                self.github.add_pull_request(repo_full_name, 101, build_signature(**fields))
+        elif job.stage == "review_round":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="review_round", job=job.id, pr=pr_number, round=job.review_round or 1),
+            )
+        elif job.stage == "merge_conflict_resolution":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
+            )
+        elif job.stage == "human_escalation":
+            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
+            self.github.add_pr_signature(
+                repo_full_name,
+                pr_number,
+                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
+            )
+        elif job.stage != "dev_sync":
+            self.github.add_pr_signature(
+                repo_full_name,
+                job.pr_number or 0,
+                build_signature(stage="final_verdict", job=job.id, pr=job.pr_number or 0, verdict="APPROVE"),
+            )
+
     def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        if self.resume_error is not None:
+            raise self.resume_error
         issue_number = job.issue_number or 0
         self.github.add_issue_signature(
             job.repo_full_name,
@@ -190,6 +263,9 @@ class FakeOmxRunner:
         )
 
     def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+        if self._transient_failures_remaining > 0:
+            self._transient_failures_remaining -= 1
+            raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
         return None
 
     def close_session(self, runtime_handle: str) -> None:

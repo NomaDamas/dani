@@ -4,6 +4,7 @@ from typing import cast
 
 import pytest
 
+from dani.errors import RolloutMissingError
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
@@ -118,6 +119,29 @@ def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
     assert session.omx_session_id == "omx-" + session.job_id
 
 
+def test_issue_request_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=21)
+    expected_signature = build_signature(stage="issue_request", job=job.id, issue=21)
+    github.add_issue_signature("acme/demo", 21, build_signature(stage="issue_request", job="stale-job", issue=21))
+    github.add_issue_signature("acme/demo", 21, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_issue_request_verification_rejects_stale_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=21)
+    github.add_issue_signature("acme/demo", 21, build_signature(stage="issue_request", job="stale-job", issue=21))
+
+    with pytest.raises(RuntimeError, match="issue-request-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
 def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     event = NormalizedEvent(
@@ -199,6 +223,307 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
 
     assert result == {"status": "ignored", "reason": "missing_issue_session"}
     assert omx_runner.resumes == []
+
+
+def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=31)
+    expected_signature = build_signature(stage="issue_followup", job=job.id, issue=31)
+    github.add_issue_signature("acme/demo", 31, build_signature(stage="issue_followup", job="stale-job", issue=31))
+    github.add_issue_signature("acme/demo", 31, expected_signature)
+
+    service._verify_side_effect(repo, job)
+
+
+def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=31)
+    github.add_issue_signature("acme/demo", 31, build_signature(stage="issue_followup", job="stale-job", issue=31))
+
+    with pytest.raises(RuntimeError, match="issue-followup-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
+def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warning(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=33,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=33,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please continue.",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=33)[0]
+    assert job.status == "failed"
+    assert job.metadata["error"] == "rollout_missing"
+    assert "thread/resume failed" in job.metadata["error_detail"]
+
+    warning_signature = build_signature(stage="session_lost", issue=33)
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo", 33, kind="issue", signature_fragment=warning_signature
+    )
+    assert len(warning_comments) == 1
+    assert "dani restart-issue acme/demo 33" in warning_comments[0]["body"]
+    latest_comment = github.latest_signature_comment("acme/demo", 33, kind="issue")
+    assert latest_comment is not None
+    assert latest_comment[1]["stage"] == "session_lost"
+    assert latest_comment[1]["issue"] == "33"
+
+
+def test_issue_followup_rollout_missing_warning_comment_is_posted_only_once(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=34,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=34,
+        actor_login="human",
+        payload={"issue": {"body": "Need automation"}},
+        body="Please continue.",
+        title="Need automation",
+    )
+
+    service.handle_event(event)
+    service.wait_for_idle()
+    service.handle_event(event)
+    service.wait_for_idle()
+
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo",
+        34,
+        kind="issue",
+        signature_fragment=build_signature(stage="session_lost", issue=34),
+    )
+    assert len(warning_comments) == 1
+    matching_keys = [
+        key
+        for key in service.storage.snapshot()["processed_events"]["keys"]
+        if "stage=session_lost" in key and "issue=34" in key
+    ]
+    assert len(matching_keys) == 1
+    failed_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=34)
+    assert len(failed_jobs) == 2
+    assert all(job.status == "failed" for job in failed_jobs)
+
+
+def test_issue_followup_rollout_missing_retries_warning_after_comment_post_failure(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=35,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+    omx_runner.set_resume_failure(
+        RolloutMissingError(
+            "thread/resume failed: no rollout found for thread id 019d6829",
+            "no rollout found",
+        )
+    )
+
+    original_create_issue_comment = github.create_issue_comment
+    attempts = 0
+
+    def flaky_create_issue_comment(repo_full_name: str, issue_number: int, body: str) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            msg = "temporary GitHub failure"
+            raise RuntimeError(msg)
+        return original_create_issue_comment(repo_full_name, issue_number, body)
+
+    github.create_issue_comment = flaky_create_issue_comment  # type: ignore[assignment]
+
+    event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=35,
+        actor_login="human",
+        payload={"issue": {"body": "Need automation"}},
+        body="Please continue.",
+        title="Need automation",
+    )
+
+    service.handle_event(event)
+    service.wait_for_idle()
+    service.handle_event(event)
+    service.wait_for_idle()
+
+    warning_comments = github.find_comments_by_signature(
+        "acme/demo",
+        35,
+        kind="issue",
+        signature_fragment=build_signature(stage="session_lost", issue=35),
+    )
+    assert attempts == 2
+    assert len(warning_comments) == 1
+    matching_keys = [
+        key
+        for key in service.storage.snapshot()["processed_events"]["keys"]
+        if "stage=session_lost" in key and "issue=35" in key
+    ]
+    assert len(matching_keys) == 1
+
+
+def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    service.queue_manager.submit = lambda job: None  # type: ignore[assignment]
+    stale_request = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=41,
+        status="completed",
+        metadata={"title": "Restart me", "body": "Original body"},
+    )
+    stale_followup = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_followup",
+        issue_number=41,
+        status="failed",
+        metadata={"omx_session_id": "omx-stale", "title": "Restart me", "body": "Original body"},
+    )
+    untouched = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=99, status="completed")
+    service.storage.create_job(stale_request)
+    service.storage.create_job(stale_followup)
+    service.storage.create_job(untouched)
+    github.issue_comment_map[("acme/demo", 41)] = [
+        {"body": "Earlier user context", "user": {"login": "human"}},
+        {"body": "Earlier dani reply", "user": {"login": "dani"}},
+    ]
+
+    new_job = service.restart_issue("acme/demo", 41)
+
+    refreshed_request = service.storage.get_job(stale_request.id)
+    refreshed_followup = service.storage.get_job(stale_followup.id)
+    untouched_job = service.storage.get_job(untouched.id)
+    assert refreshed_request is not None and refreshed_request.status == "superseded"
+    assert refreshed_followup is not None and refreshed_followup.status == "superseded"
+    assert untouched_job is not None and untouched_job.status == "completed"
+    assert new_job.stage == "issue_request"
+    assert new_job.status == "queued"
+    assert new_job.issue_number == 41
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    prompt = service._build_prompt(repo, new_job)
+    assert "Earlier user context" in prompt
+    assert "Earlier dani reply" in prompt
+
+
+def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=36,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=36,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please ignore this.\n<!-- dani:stage=ignore -->",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=36) == []
+    assert omx_runner.resumes == []
+
+
+def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=37,
+            actor_login="human",
+            payload={"issue": {"body": "context"}},
+            body="/approve\n/dani ignore",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "comment_opt_out"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=37) == []
+    assert omx_runner.launches == []
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
@@ -730,6 +1055,177 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
     assert github.merged == [("acme/demo", 77)]
 
 
+def test_approve_verdict_with_merge_conflict_queues_resolution_job(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.merge_conflicts.add(("acme/demo", 77))
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+
+    verdict_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    result = service.handle_event(verdict_event)
+    service.wait_for_idle()
+
+    resolution_jobs = service.storage.find_jobs(
+        repo_full_name="acme/demo", stage="merge_conflict_resolution", pr_number=77
+    )
+    assert result["stage"] == "merge_conflict_resolution"
+    assert resolution_jobs
+    assert resolution_jobs[0].issue_number == 5
+    assert resolution_jobs[0].metadata["head_branch"] == "Feature/#5"
+    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert github.merged == []
+
+
+def test_approve_verdict_with_merge_conflict_reuses_tracked_issue_number_without_pr_body_reference(
+    tmp_path: Path,
+) -> None:
+    service, github, _ = make_service(tmp_path)
+    github.merge_conflicts.add(("acme/demo", 77))
+    service.storage.create_job(
+        JobRecord(
+            repo_full_name="acme/demo",
+            stage="review_round",
+            issue_number=5,
+            pr_number=77,
+            review_round=1,
+            status="completed",
+        )
+    )
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "No issue reference in body",
+        title="Feature without issue in body",
+        head_branch="feature/no-issue",
+        base_branch="dev",
+    )
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=77,
+            actor_login="agent",
+            payload={},
+            body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+            title="Feature without issue in body",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    resolution_jobs = service.storage.find_jobs(
+        repo_full_name="acme/demo", stage="merge_conflict_resolution", pr_number=77
+    )
+    assert result["stage"] == "merge_conflict_resolution"
+    assert resolution_jobs[0].issue_number == 5
+    assert resolution_jobs[0].metadata["head_branch"] == "feature/no-issue"
+
+
+def test_merge_conflict_resolution_comment_queues_final_verdict_retry(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    pr_body = "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->"
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        pr_body,
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+
+    resolution_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="merge_conflict_resolution", job="resolve-1", pr=77),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    result = service.handle_event(resolution_event)
+    service.wait_for_idle()
+
+    verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
+    assert result["stage"] == "final_verdict"
+    assert verdict_jobs
+    assert verdict_jobs[0].issue_number == 5
+    assert verdict_jobs[0].metadata["title"] == "Feature/#5"
+    assert verdict_jobs[0].metadata["body"] == pr_body
+    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+
+
+def test_duplicate_merge_conflict_resolution_event_is_ignored(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="merge_conflict_resolution", job="resolve-1", pr=77),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
+    assert first["status"] == "queued"
+    assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
+    assert len(verdict_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert omx_runner.launches[-1]["job"].pr_number == 77
+
+
+def test_merge_conflict_resolution_requires_its_own_signed_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="merge_conflict_resolution", pr_number=77)
+    github.add_pr_signature(
+        "acme/demo",
+        77,
+        build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+    )
+
+    with pytest.raises(RuntimeError, match="merge-conflict-comment-missing"):
+        service._verify_side_effect(repo, job)
+
+
 def test_review_round_verification_requires_exact_signature(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
@@ -762,7 +1258,7 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
         number=77,
         actor_login="agent",
         payload={},
-        body=build_signature(stage="review_round", job="job-1", pr=77, round=1),
+        body=build_signature(stage="review_round", job="job-1", pr=77, round=1, issue=5),
         title="Feature/#5",
         is_pull_request=True,
     )
@@ -824,6 +1320,95 @@ def test_final_verdict_verification_rejects_unrelated_signed_comment(tmp_path: P
 
     with pytest.raises(RuntimeError, match="final-verdict-comment-missing"):
         service._verify_side_effect(repo, job)
+
+
+def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.merge_conflicts.add(("acme/demo", 77))
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="Feature/#5",
+        base_branch="dev",
+    )
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    first = service.handle_event(event)
+    service.wait_for_idle()
+    second = service.handle_event(event)
+    service.wait_for_idle()
+
+    resolution_jobs = service.storage.find_jobs(
+        repo_full_name="acme/demo", stage="merge_conflict_resolution", pr_number=77
+    )
+    assert first["status"] == "queued"
+    assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
+    assert len(resolution_jobs) == 1
+    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert omx_runner.launches[-1]["job"].pr_number == 77
+
+
+def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> None:
+    """A transient merge failure must not poison redelivery — the retry must succeed."""
+    from github.GithubException import GithubException
+
+    service, github, _omx_runner = make_service(tmp_path)
+    service.storage.create_job(
+        JobRecord(
+            repo_full_name="acme/demo",
+            stage="review_round",
+            issue_number=5,
+            pr_number=77,
+            review_round=1,
+            status="completed",
+        )
+    )
+    github.add_pull_request(
+        "acme/demo",
+        77,
+        "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->",
+        title="Feature/#5",
+        head_branch="feature/5",
+        base_branch="dev",
+    )
+    original_merge = github.merge_pull_request
+
+    def boom(repo_full_name: str, pr_number: int) -> None:
+        raise GithubException(500, {"message": "GitHub outage"}, {})
+
+    github.merge_pull_request = boom  # type: ignore[assignment]
+    event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="verdict-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+
+    with pytest.raises(GithubException):
+        service.handle_event(event)
+
+    # Restore normal merge and redeliver the same event
+    github.merge_pull_request = original_merge  # type: ignore[assignment]
+    result = service.handle_event(event)
+    assert result["status"] == "merged"
+    assert ("acme/demo", 77) in github.merged
 
 
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
@@ -981,3 +1566,153 @@ def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
     assert jobs[0].status == "completed"
+
+
+def test_review_round_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Review round agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    # Close the PR before the review round event arrives
+    github.close_pull_request("acme/demo", 77)
+
+    review_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job="r-1", pr=77, round=1, issue=5),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_event)
+    service.wait_for_idle()
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=77) == []
+
+
+def test_implementation_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Implementation agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    # Close the PR before the implementation event arrives
+    github.close_pull_request("acme/demo", 77)
+
+    impl_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="implementation", job="impl-1", pr=77, issue=5),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(impl_event)
+    service.wait_for_idle()
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77) == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77) == []
+
+
+def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
+    """Final verdict agent event is ignored when the PR has been closed."""
+    service, github, _ = make_service(tmp_path)
+    github.add_pull_request("acme/demo", 77, "Implements #5")
+
+    github.close_pull_request("acme/demo", 77)
+
+    verdict_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=77,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="final_verdict", job="v-1", pr=77, verdict="APPROVE"),
+        title="Feature/#5",
+        is_pull_request=True,
+    )
+    result = service.handle_event(verdict_event)
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "pr_not_open"
+    assert github.merged == []
+
+
+def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
+    """A PR opened without any linked issue number is dropped as untracked."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
+    assert omx_runner.launches == []
+
+
+def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
+    """Review-round agent event for a PR with no traceable issue is dropped."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    review_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job="r-1", pr=42, round=1),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_event)
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
+    assert omx_runner.launches == []
+
+
+def test_implementation_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
+    """Implementation agent event for a PR with no traceable issue is dropped."""
+    service, _, omx_runner = make_service(tmp_path)
+
+    impl_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="implementation", job="impl-1", pr=42),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(impl_event)
+
+    assert result == {"status": "ignored", "reason": "untracked_pr"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=42) == []
+    assert omx_runner.launches == []

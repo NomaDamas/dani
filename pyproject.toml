@@ -28,9 +28,9 @@ dependencies = [
 dani = "dani.cli:app"
 
 [project.urls]
-Homepage = "https://vkehfdl1.github.io/dani/"
-Repository = "https://github.com/vkehfdl1/dani"
-Documentation = "https://vkehfdl1.github.io/dani/"
+Homepage = "https://github.com/NomaDamas/dani"
+Repository = "https://github.com/NomaDamas/dani"
+Documentation = "https://github.com/NomaDamas/dani"
 
 [dependency-groups]
 dev = [
