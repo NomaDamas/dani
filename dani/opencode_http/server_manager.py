@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import re
@@ -149,7 +150,7 @@ class OpencodeServerManager:
                     for line in stream:
                         log_handle.write(line)
                         log_handle.flush()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.debug("opencode server log pump exited", exc_info=True)
 
         thread = threading.Thread(target=_pump, daemon=True, name=f"opencode-server-log-{process.pid}")
@@ -179,13 +180,11 @@ class OpencodeServerManager:
                 try:
                     process.wait(timeout=SERVER_SHUTDOWN_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
-                    try:
+                    with contextlib.suppress(ProcessLookupError):
                         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
                     process.kill()
                     process.wait(timeout=SERVER_SHUTDOWN_GRACE_SECONDS)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning("error terminating opencode server pid=%s", process.pid, exc_info=True)
         if entry.log_thread is not None and entry.log_thread.is_alive():
             entry.log_thread.join(timeout=1.0)

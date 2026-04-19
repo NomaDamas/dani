@@ -6,8 +6,6 @@ Run with: uv run python scripts/dev/verify_http_runner_live.py
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import sys
 import tempfile
 import time
@@ -241,17 +239,20 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
             )
             t0 = time.monotonic()
             session = runner.launch(repo_path, job, prompt)
-            _emit(test_id, f"launch returned in {time.monotonic() - t0:.2f}s; parent session_id={session.omx_session_id}")
+            _emit(
+                test_id, f"launch returned in {time.monotonic() - t0:.2f}s; parent session_id={session.omx_session_id}"
+            )
             assert session.omx_session_id and session.omx_session_id.startswith("ses_")
 
             base_url_before = runner._server_manager.get_server_for_repo(repo_path)
             try:
-                req = urllib.request.Request(f"{base_url_before}/path")
+                req = urllib.request.Request(f"{base_url_before}/path")  # noqa: S310
                 with urllib.request.urlopen(req, timeout=5) as response:  # noqa: S310
                     _ = response.read(1)
                 _emit(test_id, "server reachable BEFORE wait (HTTP 200 on /path)")
             except urllib.error.URLError as exc:
-                raise RuntimeError(f"server unreachable before wait: {exc}") from exc
+                msg = f"server unreachable before wait: {exc}"
+                raise RuntimeError(msg) from exc
 
             _emit(test_id, "wait for parent session.idle (timeout=300s)")
             t0 = time.monotonic()
@@ -259,12 +260,13 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
             _emit(test_id, f"wait returned in {time.monotonic() - t0:.2f}s")
 
             try:
-                req = urllib.request.Request(f"{base_url_before}/path")
+                req = urllib.request.Request(f"{base_url_before}/path")  # noqa: S310
                 with urllib.request.urlopen(req, timeout=5) as response:  # noqa: S310
                     _ = response.read(1)
                 _emit(test_id, "server STILL reachable AFTER subagent run (HTTP 200 on /path)")
             except urllib.error.URLError as exc:
-                raise RuntimeError(f"server died during subagent run: {exc}") from exc
+                msg = f"server died during subagent run: {exc}"
+                raise RuntimeError(msg) from exc
 
             events = _read_events(session.stdout_path)
             summary = _summarize_events(events)
@@ -302,7 +304,11 @@ def main() -> int:
     results: dict[str, Any] = {}
     failures: list[str] = []
 
-    for test_id, fn in [("TEST1", test1_server_lifecycle), ("TEST2", test2_session_management), ("TEST3", test3_ultrawork_subagents)]:
+    for test_id, fn in [
+        ("TEST1", test1_server_lifecycle),
+        ("TEST2", test2_session_management),
+        ("TEST3", test3_ultrawork_subagents),
+    ]:
         print(f"\n{'=' * 72}\n{test_id}\n{'=' * 72}", flush=True)
         try:
             t0 = time.monotonic()
@@ -310,7 +316,7 @@ def main() -> int:
             duration = time.monotonic() - t0
             results[test_id] = {"status": "PASS", "duration_seconds": round(duration, 2), "data": result}
             print(f"\n{test_id} PASS in {duration:.1f}s", flush=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             duration = time.monotonic() - t0
             results[test_id] = {"status": "FAIL", "duration_seconds": round(duration, 2), "error": repr(exc)}
             failures.append(f"{test_id}: {exc!r}")

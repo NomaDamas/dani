@@ -57,7 +57,7 @@ class FakeOpencodeClient:
         if session_id not in self.session_lookup:
             raise OpencodeHttpError(
                 status=404,
-                body=f'NotFoundError: Session not found: {session_id}',
+                body=f"NotFoundError: Session not found: {session_id}",
                 url=f"{self.base_url}/session/{session_id}",
             )
         return dict(self.session_lookup[session_id])
@@ -118,6 +118,7 @@ class StubConsumer:
         self.unregistered: list[str] = []
         self.aborted: list[str] = []
         self.session_log_paths: dict[str, Path] = {}
+        self.session_directories: dict[str, str] = {}
         self.start_count = 0
         self.stop_count = 0
         self._states: dict[str, CompletionState] = {}
@@ -128,10 +129,18 @@ class StubConsumer:
     def stop(self) -> None:
         self.stop_count += 1
 
-    def register_session(self, session_id: str, *, event_log_path: Path | None = None) -> CompletionState:
+    def register_session(
+        self,
+        session_id: str,
+        *,
+        directory: str | None = None,
+        event_log_path: Path | None = None,
+    ) -> CompletionState:
         self.registered.append(session_id)
         if event_log_path is not None:
             self.session_log_paths[session_id] = event_log_path
+        if directory is not None:
+            self.session_directories[session_id] = directory
         state = self._states.setdefault(session_id, CompletionState(sessionID=session_id))
         return state
 
@@ -206,7 +215,9 @@ def test_launch_creates_session_then_submits_prompt_async(runner_factory, tmp_pa
     assert Path(session.prompt_path).read_text(encoding="utf-8") == "ultrawork\n\nInvestigate Issue #1."
 
 
-def test_launch_does_not_double_prefix_when_prompt_already_starts_with_ultrawork(runner_factory, tmp_path: Path) -> None:
+def test_launch_does_not_double_prefix_when_prompt_already_starts_with_ultrawork(
+    runner_factory, tmp_path: Path
+) -> None:
     runner, client, _ = runner_factory()
     job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
 
@@ -233,7 +244,7 @@ def test_resume_raises_rollout_missing_when_session_404(runner_factory, tmp_path
     job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=2)
     client.get_session_raises = OpencodeHttpError(
         status=404,
-        body='NotFoundError: Session not found: ses_zzz',
+        body="NotFoundError: Session not found: ses_zzz",
         url="http://test-server/session/ses_zzz",
     )
 
@@ -451,6 +462,79 @@ def test_event_consumer_unregister_clears_per_session_log_routing(tmp_path: Path
     assert default_log.exists() and "ses_alpha" in default_log.read_text(encoding="utf-8")
 
 
+class _DirectoryTrackingFakeClient(FakeOpencodeClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_events_calls: list[str | None] = []
+        self.session_status_calls: list[str | None] = []
+
+    def stream_events(
+        self,
+        *,
+        directory: str | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        self.stream_events_calls.append(directory)
+        if stop_event is not None:
+            stop_event.wait()
+        return iter(())
+
+    def session_status(self, *, directory: str | None = None) -> dict[str, dict[str, Any]]:
+        self.session_status_calls.append(directory)
+        return super().session_status(directory=directory)
+
+
+def test_event_consumer_spawns_sse_listener_per_registered_directory(tmp_path: Path) -> None:
+    client = _DirectoryTrackingFakeClient()
+    consumer = OpencodeEventConsumer(client)  # type: ignore[arg-type]
+    consumer.start()
+    repo_a = str(tmp_path / "repo-a")
+    repo_b = str(tmp_path / "repo-b")
+    try:
+        consumer.register_session("ses_alpha", directory=repo_a)
+        consumer.register_session("ses_beta", directory=repo_b)
+        consumer.register_session("ses_alpha_followup", directory=repo_a)
+        time.sleep(0.15)
+    finally:
+        consumer.stop()
+
+    directories_listened = set(client.stream_events_calls)
+    assert repo_a in directories_listened
+    assert repo_b in directories_listened
+    assert client.stream_events_calls.count(repo_a) == 1, (
+        "should reuse the SSE listener for a directory that has multiple registered sessions"
+    )
+
+
+def test_event_consumer_does_not_listen_for_directoryless_registration() -> None:
+    client = _DirectoryTrackingFakeClient()
+    consumer = OpencodeEventConsumer(client)  # type: ignore[arg-type]
+    consumer.start()
+    try:
+        consumer.register_session("ses_nodir")
+        time.sleep(0.1)
+    finally:
+        consumer.stop()
+
+    assert client.stream_events_calls == []
+
+
+def test_event_consumer_auto_grant_forwards_directory_to_client(tmp_path: Path) -> None:
+    client = FakeOpencodeClient()
+    consumer = OpencodeEventConsumer(client)  # type: ignore[arg-type]
+    repo_perm = str(tmp_path / "repo-perm")
+    consumer.register_session("ses_perm", directory=repo_perm)
+
+    consumer._handle_event({
+        "type": "permission.updated",
+        "properties": {"id": "perm_a", "sessionID": "ses_perm"},
+    })
+
+    assert client.permission_calls == [
+        {"session_id": "ses_perm", "permission_id": "perm_a", "response": "once"},
+    ]
+
+
 def test_server_manager_returns_external_url_without_spawning(tmp_path: Path) -> None:
     manager = OpencodeServerManager(
         tmp_path / "runs",
@@ -495,15 +579,17 @@ def test_opencode_client_extract_sse_data_returns_none_when_no_data_lines() -> N
 
 def test_opencode_client_build_url_appends_query_string() -> None:
     client = OpencodeClient("http://x.test/")
-    url = client._build_url("/session", {"directory": "/tmp/repo"})
+    url = client._build_url("/session", {"directory": "/private/var/repo"})
 
-    assert url == "http://x.test/session?directory=%2Ftmp%2Frepo"
+    assert url == "http://x.test/session?directory=%2Fprivate%2Fvar%2Frepo"
 
 
 def test_opencode_client_respond_permission_swallows_404(monkeypatch: pytest.MonkeyPatch) -> None:
     client = OpencodeClient("http://x.test")
 
-    def fake_request(method: str, path: str, *, query: dict | None = None, body: dict | None = None, expect_json: bool = True):
+    def fake_request(
+        method: str, path: str, *, query: dict | None = None, body: dict | None = None, expect_json: bool = True
+    ):
         del method, path, query, body, expect_json
         raise OpencodeHttpError(status=404, body="not found", url="http://x.test")
 
@@ -574,7 +660,9 @@ def test_dani_service_runs_issue_request_through_omo_http_runner_end_to_end(
 
     original_send = fake_client.send_prompt_async
 
-    def _instrumented_send(session_id: str, *, prompt_text: str, directory: str | None = None, agent: str | None = None) -> None:
+    def _instrumented_send(
+        session_id: str, *, prompt_text: str, directory: str | None = None, agent: str | None = None
+    ) -> None:
         original_send(session_id, prompt_text=prompt_text, directory=directory, agent=agent)
         _post_signature_after_launch(session_id=session_id, prompt_text=prompt_text)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import threading
@@ -136,7 +137,7 @@ class OpencodeClient:
         stop_event: threading.Event | None = None,
     ) -> Iterator[dict[str, Any]]:
         url = self._build_url("/event", self._directory_query(directory))
-        request = urllib.request.Request(url, headers=self._headers(accept="text/event-stream"))
+        request = urllib.request.Request(url, headers=self._headers(accept="text/event-stream"))  # noqa: S310
         with urllib.request.urlopen(request, timeout=None) as response:  # noqa: S310
             buffer: list[str] = []
             for raw_line in response:
@@ -172,7 +173,7 @@ class OpencodeClient:
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
-        request = urllib.request.Request(url, data=data, method=method, headers=headers)
+        request = urllib.request.Request(url, data=data, method=method, headers=headers)  # noqa: S310
         try:
             with urllib.request.urlopen(request, timeout=self._request_timeout_seconds) as response:  # noqa: S310
                 raw = response.read()
@@ -184,10 +185,8 @@ class OpencodeClient:
                     return raw.decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             body_text = ""
-            try:
+            with contextlib.suppress(Exception):
                 body_text = exc.read().decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001
-                pass
             raise OpencodeHttpError(status=exc.code, body=body_text, url=url) from exc
 
     def _build_url(self, path: str, query: dict[str, str] | None) -> str:

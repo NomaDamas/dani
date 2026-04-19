@@ -27,9 +27,9 @@ class HttpTaskHandle:
         *,
         session_id: str,
         directory: str,
-        client: "OpencodeClient",
-        consumer: "OpencodeEventConsumer",
-        state: "CompletionState",
+        client: OpencodeClient,
+        consumer: OpencodeEventConsumer,
+        state: CompletionState,
     ) -> None:
         self.session_id = session_id
         self.directory = directory
@@ -40,7 +40,7 @@ class HttpTaskHandle:
         self._exit_code: int | None = None
 
     @property
-    def state(self) -> "CompletionState":
+    def state(self) -> CompletionState:
         return self._state
 
     def poll(self) -> int | None:
@@ -73,7 +73,7 @@ class HttpTaskHandle:
         self._closed.set()
         try:
             self._client.abort_session(self.session_id, directory=self.directory)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.debug("abort failed for session %s", self.session_id, exc_info=True)
         self._consumer.mark_aborted(self.session_id)
         if self._exit_code is None:

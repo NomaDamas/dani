@@ -261,7 +261,7 @@ class OmoHttpRunner:
         request_log_path: Path,
         event_log_path: Path,
     ) -> HttpTaskHandle:
-        state = consumer.register_session(session_id, event_log_path=event_log_path)
+        state = consumer.register_session(session_id, directory=directory, event_log_path=event_log_path)
         try:
             client.send_prompt_async(
                 session_id,

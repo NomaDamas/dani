@@ -40,24 +40,22 @@ class OpencodeEventConsumer:
         self._permission_response = permission_response
         self._sessions: dict[str, CompletionState] = {}
         self._session_log_paths: dict[str, Path] = {}
+        self._session_directories: dict[str, str] = {}
+        self._directory_threads: dict[str, threading.Thread] = {}
+        self._directory_connected: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
         self._fallback_thread: threading.Thread | None = None
-        self._sse_connected = threading.Event()
+        self._started = False
         if event_log_path is not None:
             event_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run_event_loop,
-            name="opencode-event-consumer",
-            daemon=True,
-        )
-        self._thread.start()
+        with self._lock:
+            if self._started:
+                return
+            self._stop_event.clear()
+            self._started = True
         self._fallback_thread = threading.Thread(
             target=self._run_status_fallback_loop,
             name="opencode-status-fallback",
@@ -67,14 +65,21 @@ class OpencodeEventConsumer:
 
     def stop(self) -> None:
         self._stop_event.set()
-        thread = self._thread
-        if thread is not None:
+        with self._lock:
+            threads = list(self._directory_threads.values())
+        for thread in threads:
             thread.join(timeout=2.0)
         fallback = self._fallback_thread
         if fallback is not None:
             fallback.join(timeout=2.0)
 
-    def register_session(self, session_id: str, *, event_log_path: Path | None = None) -> CompletionState:
+    def register_session(
+        self,
+        session_id: str,
+        *,
+        directory: str | None = None,
+        event_log_path: Path | None = None,
+    ) -> CompletionState:
         with self._lock:
             state = self._sessions.get(session_id)
             if state is None:
@@ -83,12 +88,17 @@ class OpencodeEventConsumer:
             if event_log_path is not None:
                 event_log_path.parent.mkdir(parents=True, exist_ok=True)
                 self._session_log_paths[session_id] = event_log_path
-            return state
+            if directory:
+                self._session_directories[session_id] = directory
+        if directory:
+            self._ensure_directory_listener(directory)
+        return state
 
     def unregister_session(self, session_id: str) -> None:
         with self._lock:
             self._sessions.pop(session_id, None)
             self._session_log_paths.pop(session_id, None)
+            self._session_directories.pop(session_id, None)
 
     def get_state(self, session_id: str) -> CompletionState | None:
         with self._lock:
@@ -103,25 +113,40 @@ class OpencodeEventConsumer:
             state.status = "aborted"
             state.event.set()
 
-    def _run_event_loop(self) -> None:
+    def _ensure_directory_listener(self, directory: str) -> None:
+        with self._lock:
+            existing = self._directory_threads.get(directory)
+            if existing is not None and existing.is_alive():
+                return
+            connected = threading.Event()
+            self._directory_connected[directory] = connected
+            thread = threading.Thread(
+                target=self._run_event_loop_for_directory,
+                args=(directory, connected),
+                name=f"opencode-event-{Path(directory).name or 'root'}",
+                daemon=True,
+            )
+            self._directory_threads[directory] = thread
+        thread.start()
+
+    def _run_event_loop_for_directory(self, directory: str, connected: threading.Event) -> None:
         backoff_index = 0
         while not self._stop_event.is_set():
             try:
-                for event in self._client.stream_events(stop_event=self._stop_event):
-                    self._sse_connected.set()
+                for event in self._client.stream_events(directory=directory, stop_event=self._stop_event):
+                    connected.set()
                     backoff_index = 0
                     self._handle_event(event)
                     if self._stop_event.is_set():
                         break
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 if self._stop_event.is_set():
                     return
-                self._sse_connected.clear()
-                backoff = SSE_RECONNECT_BACKOFF_SECONDS[
-                    min(backoff_index, len(SSE_RECONNECT_BACKOFF_SECONDS) - 1)
-                ]
+                connected.clear()
+                backoff = SSE_RECONNECT_BACKOFF_SECONDS[min(backoff_index, len(SSE_RECONNECT_BACKOFF_SECONDS) - 1)]
                 logger.warning(
-                    "opencode SSE stream error (%s); reconnecting in %.1fs",
+                    "opencode SSE stream error for directory=%s (%s); reconnecting in %.1fs",
+                    directory,
                     type(exc).__name__,
                     backoff,
                 )
@@ -129,7 +154,7 @@ class OpencodeEventConsumer:
                 if self._stop_event.wait(timeout=backoff):
                     return
                 continue
-            self._sse_connected.clear()
+            connected.clear()
             if self._stop_event.is_set():
                 return
             if self._stop_event.wait(timeout=1.0):
@@ -139,21 +164,43 @@ class OpencodeEventConsumer:
         while not self._stop_event.is_set():
             if self._stop_event.wait(timeout=STATUS_FALLBACK_POLL_SECONDS):
                 return
-            if self._sse_connected.is_set():
-                continue
+            self._poll_status_for_pending_sessions()
+
+    def _poll_status_for_pending_sessions(self) -> None:
+        with self._lock:
+            pending: list[tuple[str, str | None]] = [
+                (sid, self._session_directories.get(sid))
+                for sid, state in self._sessions.items()
+                if not state.event.is_set()
+            ]
+            all_connected = bool(self._directory_connected) and all(
+                ev.is_set() for ev in self._directory_connected.values()
+            )
+        if all_connected or not pending:
+            return
+        directories_to_probe: set[str | None] = {directory for _sid, directory in pending}
+        for directory in directories_to_probe:
             try:
-                statuses = self._client.session_status()
-            except Exception:  # noqa: BLE001
+                statuses = self._client.session_status(directory=directory)
+            except Exception as exc:
+                logger.debug("session_status fallback poll failed for %s: %s", directory, exc)
                 continue
-            with self._lock:
-                pending = [sid for sid, state in self._sessions.items() if not state.event.is_set()]
-            for session_id in pending:
-                status = statuses.get(session_id)
-                if status is None:
-                    continue
-                status_type = str(status.get("type", "")) if isinstance(status, dict) else ""
-                if status_type == "idle":
-                    self._mark_idle(session_id)
+            self._mark_idle_for_matching(pending, directory, statuses)
+
+    def _mark_idle_for_matching(
+        self,
+        pending: list[tuple[str, str | None]],
+        directory: str | None,
+        statuses: dict[str, dict[str, Any]],
+    ) -> None:
+        for session_id, session_dir in pending:
+            if session_dir != directory:
+                continue
+            status = statuses.get(session_id)
+            if not isinstance(status, dict):
+                continue
+            if str(status.get("type", "")) == "idle":
+                self._mark_idle(session_id)
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type", ""))
@@ -220,11 +267,14 @@ class OpencodeEventConsumer:
         permission_id = str(properties.get("id", "") or "")
         if not session_id or not permission_id:
             return
+        with self._lock:
+            directory = self._session_directories.get(session_id)
         try:
             self._client.respond_permission(
                 session_id,
                 permission_id,
                 response=self._permission_response,
+                directory=directory,
             )
         except OpencodeHttpError as exc:
             logger.warning(
@@ -234,7 +284,7 @@ class OpencodeEventConsumer:
                 permission_id,
                 exc.body[:200],
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "permission grant failed for session=%s permission=%s",
                 session_id,
@@ -246,11 +296,14 @@ class OpencodeEventConsumer:
         target_paths = self._resolve_log_paths(properties)
         if not target_paths:
             return
-        line = json.dumps({
-            "ts": time.time(),
-            "type": event_type,
-            "properties": properties,
-        }) + "\n"
+        line = (
+            json.dumps({
+                "ts": time.time(),
+                "type": event_type,
+                "properties": properties,
+            })
+            + "\n"
+        )
         for path in target_paths:
             try:
                 with path.open("a", encoding="utf-8") as handle:
