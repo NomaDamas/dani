@@ -124,10 +124,10 @@ def test_live_opencode_resume_continues_prior_session(tmp_path: Path, live_repo:
     )
 
 
-def test_live_opencode_ultrawork_prefix_accepted(tmp_path: Path, live_repo: Path) -> None:
+def test_live_opencode_ultrawork_prefix_accepted_for_implementation_stage(tmp_path: Path, live_repo: Path) -> None:
     runner = OmoRunner(run_dir=tmp_path / "runs")
     job_cls = _import_job_record()
-    job = job_cls(repo_full_name="live/demo", stage="issue_request", issue_number=3)
+    job = job_cls(repo_full_name="live/demo", stage="implementation", issue_number=3)
 
     prompt = "Reply with exactly the words 'ulw live ok' and stop immediately. Do not use tools. Do not enter any loop."
     session = runner.launch(live_repo, job, prompt)
@@ -146,9 +146,29 @@ def test_live_opencode_ultrawork_prefix_accepted(tmp_path: Path, live_repo: Path
     assert "ses_" in stdout_text, f"opencode stdout missing sessionID events; stderr preview: {stderr_text[:400]!r}"
 
 
+def test_live_opencode_skips_ultrawork_for_planning_issue_request_stage(tmp_path: Path, live_repo: Path) -> None:
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    job_cls = _import_job_record()
+    job = job_cls(repo_full_name="live/demo", stage="issue_request", issue_number=4)
+
+    prompt = "Reply with exactly the words 'plan only' and stop immediately. Do not use tools. Do not enter any loop."
+    session = runner.launch(live_repo, job, prompt)
+
+    prompt_text = Path(session.prompt_path).read_text(encoding="utf-8")
+    assert not prompt_text.startswith("ultrawork"), (
+        f"planning stage must not auto-prefix ultrawork; got {prompt_text[:60]!r}"
+    )
+    assert prompt_text == prompt, "planning prompt must be passed through verbatim"
+
+    try:
+        runner.wait(session.runtime_handle, timeout_seconds=240)
+    finally:
+        runner.close_session(session.runtime_handle)
+
+
 def test_live_opencode_http_runner_launch_completes_through_server(tmp_path: Path, live_repo: Path) -> None:
     runner = OmoHttpRunner(run_dir=tmp_path / "runs")
-    job = JobRecord(repo_full_name="live/demo", stage="issue_request", issue_number=10)
+    job = JobRecord(repo_full_name="live/demo", stage="implementation", issue_number=10)
 
     prompt = "Reply with exactly the words 'http live ok' and stop immediately. Do not use tools."
     session = runner.launch(live_repo, job, prompt)
@@ -175,7 +195,7 @@ def test_live_opencode_http_runner_launch_completes_through_server(tmp_path: Pat
 
 def test_live_opencode_http_runner_resume_continues_prior_session(tmp_path: Path, live_repo: Path) -> None:
     runner = OmoHttpRunner(run_dir=tmp_path / "runs")
-    launch_job = JobRecord(repo_full_name="live/demo", stage="issue_request", issue_number=11)
+    launch_job = JobRecord(repo_full_name="live/demo", stage="implementation", issue_number=11)
 
     launch_prompt = (
         "Remember this exact keyword for later: AMBER_FALCON_4291. Reply only with the word 'ok' and stop immediately."
@@ -189,7 +209,7 @@ def test_live_opencode_http_runner_resume_continues_prior_session(tmp_path: Path
     first_id = launch_session.omx_session_id
     assert first_id is not None and first_id.startswith("ses_")
 
-    resume_job = JobRecord(repo_full_name="live/demo", stage="issue_followup", issue_number=11)
+    resume_job = JobRecord(repo_full_name="live/demo", stage="implementation", issue_number=11)
     resume_prompt = (
         "What was the keyword I told you earlier in this conversation? Reply with only the keyword and nothing else."
     )

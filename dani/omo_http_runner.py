@@ -28,6 +28,7 @@ from dani.opencode_http import (
 logger = logging.getLogger(__name__)
 
 ULTRAWORK_PROMPT_PREFIX = "ultrawork\n\n"
+PLANNING_STAGES = frozenset({"issue_request", "issue_followup"})
 DANI_OPENCODE_SERVER_URL_ENV = "DANI_OPENCODE_SERVER_URL"
 DANI_OPENCODE_PERMISSION_RESPONSE_ENV = "DANI_OPENCODE_PERMISSION_RESPONSE"
 SESSION_ID_PATTERN = re.compile(r"^ses_[A-Za-z0-9]+$")
@@ -66,7 +67,7 @@ class OmoHttpRunner:
         self._consumer_factory = consumer_factory or _default_consumer_factory
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
-        prompt_text = self._decorated_prompt(prompt)
+        prompt_text = self._decorated_prompt(prompt, stage=job.stage)
         session_dir, prompt_path, request_log_path, event_log_path, handle = self._prepare_session_files(job)
         prompt_path.write_text(prompt_text, encoding="utf-8")
         client, consumer = self._get_client_and_consumer(repo_path, event_log_path)
@@ -109,7 +110,7 @@ class OmoHttpRunner:
         if not omx_session_id:
             msg = "omx_session_id is required to resume an opencode session"
             raise ValueError(msg)
-        prompt_text = self._decorated_prompt(prompt)
+        prompt_text = self._decorated_prompt(prompt, stage=job.stage)
         session_dir, prompt_path, request_log_path, event_log_path, handle = self._prepare_session_files(job)
         prompt_path.write_text(prompt_text, encoding="utf-8")
         client, consumer = self._get_client_and_consumer(repo_path, event_log_path)
@@ -203,8 +204,10 @@ class OmoHttpRunner:
             consumer.stop()
         self._server_manager.shutdown_all()
 
-    def _decorated_prompt(self, prompt: str) -> str:
+    def _decorated_prompt(self, prompt: str, *, stage: str | None = None) -> str:
         if prompt.lstrip().lower().startswith("ultrawork"):
+            return prompt
+        if stage in PLANNING_STAGES:
             return prompt
         return f"{ULTRAWORK_PROMPT_PREFIX}{prompt}"
 

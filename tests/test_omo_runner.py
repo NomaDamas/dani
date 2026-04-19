@@ -231,7 +231,7 @@ def test_launch_writes_prompt_file_with_exact_prompt_content(monkeypatch: pytest
     monkeypatch.setattr("dani.omo_runner.subprocess.Popen", fake_popen)
     monkeypatch.setattr(runner, "_capture_session_id", lambda **kwargs: None)
 
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
     runner.launch(tmp_path / "repo", job, "HELLO EXACT PROMPT BODY 12345")
 
     assert captured_prompts == ["ultrawork\n\nHELLO EXACT PROMPT BODY 12345"]
@@ -268,7 +268,7 @@ def test_resume_writes_prompt_file_with_exact_prompt_content(monkeypatch: pytest
 
     monkeypatch.setattr("dani.omo_runner.subprocess.Popen", fake_popen)
 
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
     runner.resume(tmp_path / "repo", job, "RESUME EXACT PROMPT 67890", "ses_persisted")
 
     assert captured_prompts == ["ultrawork\n\nRESUME EXACT PROMPT 67890"]
@@ -436,12 +436,7 @@ def test_build_agent_runner_rejects_unknown_runtime(tmp_path: Path) -> None:
         build_agent_runner("nonsense", tmp_path / "runs")
 
 
-def test_omo_runner_always_prepends_ultrawork_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from dani.models import JobRecord
-
-    runner = OmoRunner(run_dir=tmp_path / "runs")
-    captured_prompts: list[str] = []
-
+def _install_fake_omo_popen(monkeypatch: pytest.MonkeyPatch, captured_prompts: list[str]) -> None:
     class FakeProcess:
         def poll(self) -> int:
             return 0
@@ -466,12 +461,50 @@ def test_omo_runner_always_prepends_ultrawork_prefix(monkeypatch: pytest.MonkeyP
         return FakeProcess()
 
     monkeypatch.setattr("dani.omo_runner.subprocess.Popen", fake_popen)
+
+
+def test_omo_runner_implementation_stage_prepends_ultrawork_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import JobRecord
+
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    captured_prompts: list[str] = []
+    _install_fake_omo_popen(monkeypatch, captured_prompts)
+
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
+    runner.launch(tmp_path / "repo", job, "Implement feature.")
+
+    assert captured_prompts == ["ultrawork\n\nImplement feature."]
+
+
+def test_omo_runner_issue_request_stage_skips_ultrawork_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from dani.models import JobRecord
+
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    captured_prompts: list[str] = []
+    _install_fake_omo_popen(monkeypatch, captured_prompts)
     monkeypatch.setattr(runner, "_capture_session_id", lambda **kwargs: None)
 
     job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
     runner.launch(tmp_path / "repo", job, "Investigate Issue #33.")
 
-    assert captured_prompts == ["ultrawork\n\nInvestigate Issue #33."]
+    assert captured_prompts == ["Investigate Issue #33."]
+
+
+def test_omo_runner_issue_followup_stage_skips_ultrawork_prefix_on_resume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import JobRecord
+
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    captured_prompts: list[str] = []
+    _install_fake_omo_popen(monkeypatch, captured_prompts)
+
+    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=1)
+    runner.resume(tmp_path / "repo", job, "Refine plan from follow-up", "ses_persisted_omo")
+
+    assert captured_prompts == ["Refine plan from follow-up"]
 
 
 def test_omo_runner_does_not_double_prefix_when_prompt_already_starts_with_ultrawork(
@@ -481,71 +514,24 @@ def test_omo_runner_does_not_double_prefix_when_prompt_already_starts_with_ultra
 
     runner = OmoRunner(run_dir=tmp_path / "runs")
     captured_prompts: list[str] = []
+    _install_fake_omo_popen(monkeypatch, captured_prompts)
 
-    class FakeProcess:
-        def poll(self) -> int:
-            return 0
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-        def terminate(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            return None
-
-    def fake_popen(cmd, **kwargs):
-        script_path = Path(cmd[0])
-        script_text = script_path.read_text(encoding="utf-8")
-        prompt_line = next((line for line in script_text.splitlines() if "cat " in line), "")
-        prompt_file = Path(prompt_line.rsplit("cat ", 1)[1].rstrip(')"'))
-        captured_prompts.append(prompt_file.read_text(encoding="utf-8"))
-        kwargs["stdout"].close()
-        kwargs["stderr"].close()
-        return FakeProcess()
-
-    monkeypatch.setattr("dani.omo_runner.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(runner, "_capture_session_id", lambda **kwargs: None)
-
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
     runner.launch(tmp_path / "repo", job, "ultrawork already leading")
 
     assert captured_prompts == ["ultrawork already leading"]
 
 
-def test_omo_runner_resume_also_applies_ultrawork_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_omo_runner_resume_implementation_stage_applies_ultrawork_prefix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from dani.models import JobRecord
 
     runner = OmoRunner(run_dir=tmp_path / "runs")
     captured_prompts: list[str] = []
+    _install_fake_omo_popen(monkeypatch, captured_prompts)
 
-    class FakeProcess:
-        def poll(self) -> int:
-            return 0
-
-        def wait(self, timeout: float | None = None) -> int:
-            return 0
-
-        def terminate(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            return None
-
-    def fake_popen(cmd, **kwargs):
-        script_path = Path(cmd[0])
-        script_text = script_path.read_text(encoding="utf-8")
-        prompt_line = next((line for line in script_text.splitlines() if "cat " in line), "")
-        prompt_file = Path(prompt_line.rsplit("cat ", 1)[1].rstrip(')"'))
-        captured_prompts.append(prompt_file.read_text(encoding="utf-8"))
-        kwargs["stdout"].close()
-        kwargs["stderr"].close()
-        return FakeProcess()
-
-    monkeypatch.setattr("dani.omo_runner.subprocess.Popen", fake_popen)
-
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
     runner.resume(tmp_path / "repo", job, "Continue fixing", "ses_persisted_omo")
 
     assert captured_prompts == ["ultrawork\n\nContinue fixing"]

@@ -19,6 +19,7 @@ from dani.models import JobRecord, SessionRecord
 
 OPENCODE_BIN = "opencode"
 ULTRAWORK_PROMPT_PREFIX = "ultrawork\n\n"
+PLANNING_STAGES = frozenset({"issue_request", "issue_followup"})
 
 
 class OmoRunner:
@@ -35,14 +36,16 @@ class OmoRunner:
         self._lock = threading.RLock()
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-    def _decorated_prompt(self, prompt: str) -> str:
+    def _decorated_prompt(self, prompt: str, *, stage: str | None = None) -> str:
         if prompt.lstrip().lower().startswith("ultrawork"):
+            return prompt
+        if stage in PLANNING_STAGES:
             return prompt
         return f"{ULTRAWORK_PROMPT_PREFIX}{prompt}"
 
     def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
         session_dir, prompt_path, script_path, stdout_path, stderr_path, handle = self._prepare_session_files(job)
-        prompt_path.write_text(self._decorated_prompt(prompt), encoding="utf-8")
+        prompt_path.write_text(self._decorated_prompt(prompt, stage=job.stage), encoding="utf-8")
         script_path.write_text(
             self._build_script(repo_path=repo_path, prompt_path=prompt_path),
             encoding="utf-8",
@@ -73,7 +76,7 @@ class OmoRunner:
 
     def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
         session_dir, prompt_path, script_path, stdout_path, stderr_path, handle = self._prepare_session_files(job)
-        prompt_path.write_text(self._decorated_prompt(prompt), encoding="utf-8")
+        prompt_path.write_text(self._decorated_prompt(prompt, stage=job.stage), encoding="utf-8")
         script_path.write_text(
             self._build_resume_script(
                 repo_path=repo_path,

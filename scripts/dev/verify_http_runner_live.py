@@ -140,7 +140,7 @@ def test2_session_management() -> dict[str, Any]:
             _emit(test_id, "launch with simple deterministic prompt")
             launch_job = JobRecord(
                 repo_full_name="live/verify",
-                stage="issue_request",
+                stage="implementation",
                 issue_number=2001,
             )
             prompt_a = (
@@ -169,7 +169,7 @@ def test2_session_management() -> dict[str, Any]:
             _emit(test_id, "resume same session with follow-up prompt")
             resume_job = JobRecord(
                 repo_full_name="live/verify",
-                stage="issue_followup",
+                stage="implementation",
                 issue_number=2001,
             )
             prompt_b = (
@@ -221,7 +221,7 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
             _emit(test_id, "launch with ultrawork prompt that demands ONE quick subagent call via task()")
             job = JobRecord(
                 repo_full_name="live/verify",
-                stage="issue_request",
+                stage="implementation",
                 issue_number=3001,
             )
             prompt = (

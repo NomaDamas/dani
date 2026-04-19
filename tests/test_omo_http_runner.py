@@ -201,25 +201,44 @@ def runner_factory(tmp_path: Path):
     return _make
 
 
-def test_launch_creates_session_then_submits_prompt_async(runner_factory, tmp_path: Path) -> None:
+def test_launch_implementation_stage_prepends_ultrawork_prefix(runner_factory, tmp_path: Path) -> None:
     runner, client, consumer = runner_factory()
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
 
-    session = runner.launch(tmp_path, job, "Investigate Issue #1.")
+    session = runner.launch(tmp_path, job, "Implement Issue #1.")
 
     assert client.created_sessions and client.created_sessions[0]["directory"] == str(tmp_path)
     assert client.prompt_calls and client.prompt_calls[0]["session_id"] == client.created_sessions[0]["id"]
-    assert client.prompt_calls[0]["prompt_text"] == "ultrawork\n\nInvestigate Issue #1."
+    assert client.prompt_calls[0]["prompt_text"] == "ultrawork\n\nImplement Issue #1."
     assert session.omx_session_id == client.created_sessions[0]["id"]
     assert consumer.registered == [session.omx_session_id]
-    assert Path(session.prompt_path).read_text(encoding="utf-8") == "ultrawork\n\nInvestigate Issue #1."
+    assert Path(session.prompt_path).read_text(encoding="utf-8") == "ultrawork\n\nImplement Issue #1."
+
+
+def test_launch_issue_request_stage_skips_ultrawork_prefix(runner_factory, tmp_path: Path) -> None:
+    runner, client, _ = runner_factory()
+    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
+
+    runner.launch(tmp_path, job, "Investigate Issue #1.")
+
+    assert client.prompt_calls[0]["prompt_text"] == "Investigate Issue #1."
+
+
+def test_launch_issue_followup_stage_skips_ultrawork_prefix(runner_factory, tmp_path: Path) -> None:
+    runner, client, _ = runner_factory()
+    client.session_lookup["ses_already1234"] = {"id": "ses_already1234", "directory": str(tmp_path)}
+    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=2)
+
+    runner.resume(tmp_path, job, "Refine plan based on follow-up.", "ses_already1234")
+
+    assert client.prompt_calls[0]["prompt_text"] == "Refine plan based on follow-up."
 
 
 def test_launch_does_not_double_prefix_when_prompt_already_starts_with_ultrawork(
     runner_factory, tmp_path: Path
 ) -> None:
     runner, client, _ = runner_factory()
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=1)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
 
     runner.launch(tmp_path, job, "ultrawork already leading")
 
@@ -229,7 +248,7 @@ def test_launch_does_not_double_prefix_when_prompt_already_starts_with_ultrawork
 def test_resume_validates_session_then_sends_prompt(runner_factory, tmp_path: Path) -> None:
     runner, client, consumer = runner_factory()
     client.session_lookup["ses_existingone1234"] = {"id": "ses_existingone1234", "directory": str(tmp_path)}
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=2)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=2)
 
     session = runner.resume(tmp_path, job, "Continue work", "ses_existingone1234")
 
@@ -358,13 +377,13 @@ def test_send_prompt_failure_unregisters_session_state(runner_factory, tmp_path:
 
 def test_runner_writes_request_log_for_inspection(runner_factory, tmp_path: Path) -> None:
     runner, _, _ = runner_factory()
-    job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=10)
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=10)
 
-    session = runner.launch(tmp_path, job, "Investigate Issue #10.")
+    session = runner.launch(tmp_path, job, "Implement Issue #10.")
 
     request_payload = json.loads(Path(session.script_path).read_text(encoding="utf-8"))
     assert request_payload["session_id"] == session.omx_session_id
-    assert request_payload["prompt_text"] == "ultrawork\n\nInvestigate Issue #10."
+    assert request_payload["prompt_text"] == "ultrawork\n\nImplement Issue #10."
 
 
 def test_event_consumer_auto_grants_permission_with_default_once(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -719,4 +738,6 @@ def test_dani_service_runs_issue_request_through_omo_http_runner_end_to_end(
     sessions = storage.list_sessions()
     assert len(sessions) == 1
     assert sessions[0].omx_session_id == fake_client.created_sessions[0]["id"]
-    assert fake_client.prompt_calls[0]["prompt_text"].startswith("ultrawork\n\n")
+    assert not fake_client.prompt_calls[0]["prompt_text"].startswith("ultrawork"), (
+        "issue_request is a planning stage; ultrawork prefix must not be auto-prepended"
+    )
