@@ -1026,6 +1026,8 @@ class DaniService:
         )
         if session is None or session.omx_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
+        if not self.omx_runner.can_resume(session.omx_session_id):
+            return self._queue_issue_request(repo, event)
         job = self._enqueue_job(
             repo,
             stage="issue_followup",

@@ -116,9 +116,9 @@ class OmoHttpRunner:
         try:
             client.get_session(omx_session_id, directory=str(repo_path))
         except OpencodeHttpError as exc:
-            if exc.status == 404:
+            if self._is_session_missing_response(exc):
                 check_opencode_session_missing_error(f"Session not found: {omx_session_id}\n{exc.body}")
-                msg = f"opencode session {omx_session_id} not found (status 404)"
+                msg = f"opencode session {omx_session_id} not found (status {exc.status})"
                 raise OpencodeHttpError(status=exc.status, body=msg, url=exc.url) from None
             raise
         self._submit_prompt_and_register(
@@ -287,6 +287,18 @@ class OmoHttpRunner:
             self._handle_to_session[handle] = session_id
             self._session_to_base_url[session_id] = client.base_url
         return task_handle
+
+    @staticmethod
+    def _is_session_missing_response(exc: OpencodeHttpError) -> bool:
+        if exc.status == 404:
+            return True
+        if exc.status == 400:
+            body_lower = exc.body.lower() if exc.body else ""
+            if "must start with" in body_lower and "ses" in body_lower:
+                return True
+            if "invalid_format" in body_lower and "sessionid" in body_lower:
+                return True
+        return False
 
     @staticmethod
     def _resolve_permission_response(explicit: str | None) -> str:

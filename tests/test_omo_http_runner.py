@@ -252,6 +252,26 @@ def test_resume_raises_rollout_missing_when_session_404(runner_factory, tmp_path
         runner.resume(tmp_path, job, "Continue", "ses_zzz")
 
 
+def test_resume_raises_rollout_missing_when_opencode_400_invalid_session_id_format(
+    runner_factory, tmp_path: Path
+) -> None:
+    runner, client, _ = runner_factory()
+    job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=2)
+    client.get_session_raises = OpencodeHttpError(
+        status=400,
+        body=(
+            '{"data":{"sessionID":"019da0f4-6ef1-7923-811f-57eb3e93bd8e"},'
+            '"error":[{"origin":"string","code":"invalid_format","format":"starts_with",'
+            '"prefix":"ses","path":["sessionID"],"message":"Invalid string: must start with \\"ses\\""}],'
+            '"success":false}'
+        ),
+        url="http://test-server/session/019da0f4-6ef1-7923-811f-57eb3e93bd8e",
+    )
+
+    with pytest.raises(RolloutMissingError):
+        runner.resume(tmp_path, job, "Continue", "019da0f4-6ef1-7923-811f-57eb3e93bd8e")
+
+
 def test_wait_returns_when_consumer_marks_idle(runner_factory, tmp_path: Path) -> None:
     runner, _, consumer = runner_factory()
     job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=3)

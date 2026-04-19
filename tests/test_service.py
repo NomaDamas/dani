@@ -237,6 +237,115 @@ def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) ->
     service._verify_side_effect(repo, job)
 
 
+def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import SessionRecord
+
+    service, _, omx_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+
+    legacy_session_id = "019da0f4-6ef1-7923-811f-57eb3e93bd8e"
+    legacy_session = SessionRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_request",
+        runtime_handle="runtime-legacy",
+        prompt_path=str(tmp_path / "legacy-prompt.txt"),
+        script_path=str(tmp_path / "legacy.sh"),
+        worktree_path=str(tmp_path),
+        job_id="legacy-job-id",
+        issue_number=731,
+        omx_session_id=legacy_session_id,
+    )
+    service.storage.create_session(legacy_session)
+
+    monkeypatch.setattr(
+        omx_runner,
+        "can_resume",
+        lambda session_id: bool(session_id) and not session_id.startswith("019d"),
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=731,
+            actor_login="human",
+            payload={"issue": {"body": "fallback comment"}},
+            body="this is a fresh comment on a legacy issue",
+            title="Legacy followup",
+        )
+    )
+    service.wait_for_idle()
+
+    request_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_request" and job.issue_number == 731
+    ]
+    followup_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_followup" and job.issue_number == 731
+    ]
+    assert request_jobs, "expected a fresh issue_request to be enqueued when prior session id is non-resumable"
+    assert not followup_jobs, "must NOT enqueue an issue_followup against an un-resumable session id"
+    assert not omx_runner.resumes, "runner.resume must not be invoked when can_resume returned False"
+    assert any(launch["job"].issue_number == 731 for launch in omx_runner.launches), (
+        "runner.launch must run a fresh session for the legacy issue"
+    )
+
+
+def test_issue_comment_with_resumable_prior_session_still_resumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import SessionRecord
+
+    service, _, omx_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+
+    resumable_session_id = "ses_25ad70836ffemLP2sYPAkGq8hd"
+    resumable_session = SessionRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_request",
+        runtime_handle="runtime-resumable",
+        prompt_path=str(tmp_path / "prompt.txt"),
+        script_path=str(tmp_path / "run.sh"),
+        worktree_path=str(tmp_path),
+        job_id="resumable-job-id",
+        issue_number=732,
+        omx_session_id=resumable_session_id,
+    )
+    service.storage.create_session(resumable_session)
+
+    monkeypatch.setattr(
+        omx_runner,
+        "can_resume",
+        lambda session_id: bool(session_id) and session_id.startswith("ses_"),
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=732,
+            actor_login="human",
+            payload={"issue": {"body": "resume me"}},
+            body="continue please",
+            title="Resumable followup",
+        )
+    )
+    service.wait_for_idle()
+
+    followup_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_followup" and job.issue_number == 732
+    ]
+    assert followup_jobs, "expected an issue_followup job when prior session id is resumable"
+    assert any(resume["omx_session_id"] == resumable_session_id for resume in omx_runner.resumes), (
+        "runner.resume must be invoked with the resumable session id"
+    )
+
+
 def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
