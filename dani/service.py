@@ -1026,6 +1026,20 @@ class DaniService:
         )
         if session is None or session.omx_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
+        if not self.omx_runner.can_resume(session.omx_session_id):
+            rerouted_job = self._enqueue_job(
+                repo,
+                stage="issue_request",
+                issue_number=event.number,
+                metadata={
+                    "title": event.title or "",
+                    "body": event.payload.get("issue", {}).get("body", ""),
+                    "comment_body": event.body or "",
+                    "rerouted_from": "issue_followup",
+                    "prior_session_id": session.omx_session_id,
+                },
+            )
+            return {"status": "queued", "job_id": rerouted_job.id, "stage": rerouted_job.stage}
         job = self._enqueue_job(
             repo,
             stage="issue_followup",

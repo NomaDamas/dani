@@ -897,3 +897,18 @@ def test_dani_service_handles_opencode_session_missing_on_followup_resume(
         if "stage=session_lost" in comment.get("body", "")
     ]
     assert warning_comments, "service should have posted the session_lost warning comment"
+
+
+def test_omo_can_resume_opencode_prefixed_session_id(tmp_path: Path) -> None:
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("ses_25afdf9c7ffekN3dovMQw6meL2") is True
+
+
+def test_omo_can_resume_rejects_uuid_like_session_id(tmp_path: Path) -> None:
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("019da16a-565d-7c81-98c9-4b7ff38a3f9b") is False
+
+
+def test_omo_can_resume_rejects_empty_session_id(tmp_path: Path) -> None:
+    runner = OmoRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("") is False

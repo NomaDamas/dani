@@ -139,6 +139,9 @@ class OmoRunner:
         stdout_path = self.run_dir / runtime_handle / "stdout.log"
         return self._session_id_from_stdout(stdout_path)
 
+    def can_resume(self, session_id: str) -> bool:
+        return bool(session_id) and session_id.startswith("ses_")
+
     def _prepare_session_files(self, job: JobRecord) -> tuple[Path, Path, Path, Path, Path, str]:
         session_token = uuid4().hex[:10]
         handle = f"dani-{job.stage}-{session_token}"

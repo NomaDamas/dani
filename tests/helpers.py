@@ -269,6 +269,11 @@ class FakeOmxRunner:
         del runtime_handle
         return None
 
+    def can_resume(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+        return not session_id.startswith("ses_")
+
 
 class FakeGitDevSyncer:
     def __init__(self, *, conflict: bool = False, fail: bool = False) -> None:

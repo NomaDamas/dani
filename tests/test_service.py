@@ -225,6 +225,101 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
     assert omx_runner.resumes == []
 
 
+def test_issue_followup_reroutes_to_issue_request_when_legacy_session_cannot_resume(
+    tmp_path: Path,
+) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=91,
+            actor_login="human",
+            payload={},
+            body="legacy issue body",
+            title="Legacy issue",
+        )
+    )
+    service.wait_for_idle()
+    original_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=91)
+    assert len(original_jobs) == 1
+
+    prior_session = next(s for s in service.storage.list_sessions() if s.job_id == original_jobs[0].id)
+    assert prior_session.omx_session_id is not None
+
+    legacy_uuid = "019da16a-565d-7c81-98c9-4b7ff38a3f9b"
+    service.storage.update_session(prior_session.id, omx_session_id=legacy_uuid)
+
+    def can_resume_only_opencode_ids(session_id: str) -> bool:
+        return bool(session_id) and session_id.startswith("ses_")
+
+    omx_runner.can_resume = can_resume_only_opencode_ids  # type: ignore[method-assign]
+
+    follow_up_body = "omo로 똑같이 해볼 수 있는지 봐봐"
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=91,
+            actor_login="human",
+            payload={"issue": {"body": "legacy issue body"}},
+            body=follow_up_body,
+            title="Legacy issue",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["status"] == "queued"
+    assert result["stage"] == "issue_request"
+    followup_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=91)
+    assert followup_jobs == []
+    rerouted_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=91)
+    assert len(rerouted_jobs) == 2
+    new_job = next(j for j in rerouted_jobs if j.id != original_jobs[0].id)
+    assert new_job.metadata.get("rerouted_from") == "issue_followup"
+    assert new_job.metadata.get("comment_body") == follow_up_body
+    assert omx_runner.resumes == []
+    assert omx_runner.launches[-1]["job"].stage == "issue_request"
+
+
+def test_issue_followup_resumes_when_runner_can_resume_legacy_session(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=92,
+            actor_login="human",
+            payload={},
+            body="compatible issue",
+            title="Compatible issue",
+        )
+    )
+    service.wait_for_idle()
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=92,
+            actor_login="human",
+            payload={"issue": {"body": "compatible issue"}},
+            body="still the same runtime, resume as usual",
+            title="Compatible issue",
+        )
+    )
+    service.wait_for_idle()
+
+    followup_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=92)
+    assert len(followup_jobs) == 1
+    assert omx_runner.resumes, "resume should run when runner reports the session id is compatible"
+    assert omx_runner.resumes[-1]["omx_session_id"].startswith("omx-")
+
+
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")

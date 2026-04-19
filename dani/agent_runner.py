@@ -50,6 +50,8 @@ class AgentRunner(Protocol):
 
     def get_session_id(self, runtime_handle: str) -> str | None: ...
 
+    def can_resume(self, session_id: str) -> bool: ...
+
 
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
     """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``)."""
