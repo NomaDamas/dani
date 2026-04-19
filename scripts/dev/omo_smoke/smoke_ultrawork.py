@@ -44,6 +44,7 @@ def main() -> int:
     runner.wait(session.runtime_handle, timeout_seconds=300)
     runner.close_session(session.runtime_handle)
 
+    assert session.stdout_path is not None and session.stderr_path is not None
     stdout_text = Path(session.stdout_path).read_text(encoding="utf-8", errors="replace")
     stderr_text = Path(session.stderr_path).read_text(encoding="utf-8", errors="replace")
     assert "ses_" in stdout_text, "expected sessionID events in opencode stdout"

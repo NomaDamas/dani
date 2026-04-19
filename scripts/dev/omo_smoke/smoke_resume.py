@@ -52,6 +52,7 @@ def main() -> int:
     assert f"opencode run --session {first_sid} --format json --dangerously-skip-permissions" in script
     runner.wait(session2.runtime_handle, timeout_seconds=180)
     runner.close_session(session2.runtime_handle)
+    assert session2.stdout_path is not None
     stdout_text = Path(session2.stdout_path).read_text(encoding="utf-8", errors="replace")
     print(f"[smoke-resume] phase 2 wall: {time.monotonic() - t1:.1f}s")
 

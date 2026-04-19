@@ -60,6 +60,7 @@ def test_live_opencode_launch_emits_session_id_and_completes(tmp_path: Path, liv
     finally:
         runner.close_session(session.runtime_handle)
 
+    assert session.stdout_path is not None and session.stderr_path is not None
     stdout_text = Path(session.stdout_path).read_text(encoding="utf-8", errors="replace")
     stderr_text = Path(session.stderr_path).read_text(encoding="utf-8", errors="replace")
 
@@ -113,6 +114,7 @@ def test_live_opencode_resume_continues_prior_session(tmp_path: Path, live_repo:
     resume_script_text = Path(resume_session.script_path).read_text(encoding="utf-8")
     assert f"opencode run --session {first_id} --format json --dangerously-skip-permissions" in resume_script_text
 
+    assert resume_session.stdout_path is not None
     resume_stdout = Path(resume_session.stdout_path).read_text(encoding="utf-8", errors="replace")
     assert "CRIMSON_MOOSE_7361" in resume_stdout, (
         "resume did not continue prior session — keyword missing from opencode reply; "
@@ -136,6 +138,7 @@ def test_live_opencode_ultrawork_prefix_accepted(tmp_path: Path, live_repo: Path
     finally:
         runner.close_session(session.runtime_handle)
 
+    assert session.stdout_path is not None and session.stderr_path is not None
     stdout_text = Path(session.stdout_path).read_text(encoding="utf-8", errors="replace")
     stderr_text = Path(session.stderr_path).read_text(encoding="utf-8", errors="replace")
     assert "ses_" in stdout_text, f"opencode stdout missing sessionID events; stderr preview: {stderr_text[:400]!r}"

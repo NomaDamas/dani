@@ -43,6 +43,7 @@ def main() -> int:
     runner.wait(session.runtime_handle, timeout_seconds=180)
     runner.close_session(session.runtime_handle)
 
+    assert session.stdout_path is not None
     stdout_text = Path(session.stdout_path).read_text(encoding="utf-8", errors="replace")
     captured = session.omx_session_id or runner.get_session_id(session.runtime_handle)
     assert captured is not None and captured.startswith("ses_"), f"expected a ses_... session id, got {captured!r}"
