@@ -7,11 +7,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
+from dani.agent_runner import AgentRunner, build_agent_runner
+from dani.errors import (
+    OPENCODE_SESSION_MISSING_PATTERNS,
+    ROLLOUT_MISSING_PATTERNS,
+    RolloutMissingError,
+    TransientCapacityError,
+)
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
-from dani.omx_runner import OmxRunner
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
@@ -30,13 +35,16 @@ class DaniService:
         config: DaniConfig,
         storage: JsonStorage | None = None,
         github: Any = None,
-        omx_runner: Any = None,
+        omx_runner: AgentRunner | None = None,
         dev_syncer: Any = None,
     ) -> None:
         self.config = config
         self.storage = storage or JsonStorage(config)
         self.github = github or GitHubCLI()
-        self.omx_runner = omx_runner or OmxRunner(config.run_dir)
+        self.omx_runner: AgentRunner = omx_runner or build_agent_runner(
+            config.agent_runtime,
+            config.run_dir,
+        )
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
         self.queue_manager = RepoQueueManager(self._run_job)
 
@@ -424,6 +432,10 @@ class DaniService:
         except Exception:
             self._finalize_session(session, status="failed", termination_reason="failed")
             raise
+        if session.omx_session_id is None:
+            post_wait_session_id = self.omx_runner.get_session_id(session.runtime_handle)
+            if post_wait_session_id:
+                self.storage.update_session(session.id, omx_session_id=post_wait_session_id)
         self._finalize_session(session, status="completed", termination_reason="completed")
 
     def _handle_transient_failure(
@@ -527,6 +539,7 @@ class DaniService:
                     "temp_branch": conflict_context.temp_branch,
                     "commit_message": self.dev_syncer.build_commit_message(repo, job),
                 },
+                runtime=self.config.agent_runtime,
             )
             session = self.omx_runner.launch(conflict_context.worktree_path, job, prompt)
             self.storage.create_session(session)
@@ -546,7 +559,7 @@ class DaniService:
             self.storage.update_job(
                 job.id,
                 status="completed",
-                metadata={**job.metadata, "sync_status": "resolved_with_omx"},
+                metadata={**job.metadata, "sync_status": "resolved_with_agent"},
             )
         except Exception as exc:
             if session is not None:
@@ -642,6 +655,7 @@ class DaniService:
                 "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_implementation_prompt(
@@ -704,6 +718,7 @@ class DaniService:
                 "signature": signature,
                 "signature_instructions": signature_instructions,
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_issue_followup_prompt(
@@ -725,6 +740,7 @@ class DaniService:
                 "comment_body": job.metadata.get("comment_body", ""),
                 "signature": build_signature(stage="issue_followup", job=job.id, issue=issue_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_review_round_prompt(
@@ -769,6 +785,7 @@ class DaniService:
                 ),
                 "signature": build_signature(**signature_fields),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_merge_conflict_resolution_prompt(
@@ -794,6 +811,7 @@ class DaniService:
                 "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
                 "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_final_verdict_prompt(
@@ -828,6 +846,7 @@ class DaniService:
                 ),
                 "reject_signature": build_signature(stage="final_verdict", job=job.id, pr=pr_number, verdict="REJECT"),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _build_human_escalation_prompt(
@@ -856,6 +875,7 @@ class DaniService:
                 "review_limit": self.config.external_review_limit,
                 "signature": build_signature(stage="human_escalation", job=job.id, pr=pr_number),
             },
+            runtime=self.config.agent_runtime,
         )
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -1267,7 +1287,9 @@ class DaniService:
         if isinstance(exc, RolloutMissingError):
             return True
         error_text = str(exc)
-        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+        return any(
+            pattern.search(error_text) for pattern in (*ROLLOUT_MISSING_PATTERNS, *OPENCODE_SESSION_MISSING_PATTERNS)
+        )
 
     def _post_session_lost_warning(self, job: JobRecord) -> None:
         if job.stage != "issue_followup" or job.issue_number is None:
