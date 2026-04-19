@@ -18,14 +18,26 @@ $issue_body
 Existing issue discussion history:
 $discussion
 
+Before writing the comment, do real research — do not produce a plan from memory alone.
+Research requirements:
+- Search the codebase for existing reusable code (modules, functions, utilities, patterns) that already address part of the issue. Cite any findings as path/to/file.py:line.
+- Investigate external sources (official docs, GitHub repos, package registries, web search) for APIs or libraries that already provide the needed capability. Cite any findings as "Title - URL".
+- If nothing is reusable in-repo, state exactly: "no existing reusable code found".
+- If no suitable external dependency exists, state exactly: "no suitable external library found".
+
 Write one GitHub issue comment.
 Checklist:
 - [ ] AI-understood issue summary
 - [ ] Why this issue is needed
 - [ ] Why this issue may not be needed
 - [ ] Expected Outcome
-- [ ] Concise implementation plan
+- [ ] Evidence-based implementation plan
 - [ ] Agent Signature
+
+For the "Evidence-based implementation plan" section, report:
+- Feasibility grounded in the research above (reusable code and/or external libraries, with citations).
+- A concrete step-by-step plan that references the cited evidence (path/to/file.py:line for code, "Title - URL" for external references).
+- Any risks or assumptions surfaced by the research.
 
 Use this exact signature somewhere in the comment:
 $signature

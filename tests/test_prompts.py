@@ -149,6 +149,81 @@ def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None
     assert "Expected Outcome" in prompt
 
 
+def test_issue_request_prompt_demands_evidence_based_plan() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "Evidence-based implementation plan" in prompt
+    assert "Concise implementation plan" not in prompt
+
+
+def test_issue_request_prompt_instructs_research_before_planning() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    lowered = prompt.lower()
+    assert "search the codebase" in lowered or "explore the codebase" in lowered
+    assert "external" in lowered
+    assert "official docs" in lowered or "documentation" in lowered
+
+
+def test_issue_request_prompt_allows_explicit_not_found_statement() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    lowered = prompt.lower()
+    assert "no existing reusable code found" in lowered
+    assert "no suitable external library found" in lowered
+
+
+def test_issue_request_prompt_specifies_citation_format() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "path/to/file.py:line" in prompt
+    assert "URL" in prompt
+
+
 def test_issue_request_prompt_includes_existing_discussion_history() -> None:
     prompt = render_prompt(
         "issue_request",
