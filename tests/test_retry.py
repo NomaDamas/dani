@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 import pytest
 
+from dani.agent_runner import AgentRunner
 from dani.errors import TransientCapacityError, check_transient_capacity_error
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, NormalizedEvent
-from dani.omx_runner import OmxRunner
 from dani.service import RETRY_BACKOFF_SECONDS, DaniService
 from dani.storage import JsonStorage
 from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
@@ -30,7 +30,7 @@ def make_service(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))

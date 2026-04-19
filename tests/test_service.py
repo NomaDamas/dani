@@ -4,10 +4,10 @@ from typing import cast
 
 import pytest
 
+from dani.agent_runner import AgentRunner
 from dani.errors import RolloutMissingError
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, JobRecord, NormalizedEvent
-from dani.omx_runner import OmxRunner
 from dani.service import DaniService
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
@@ -50,7 +50,7 @@ def make_service(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -902,7 +902,7 @@ def test_external_pr_unique_activity_never_queues_an_eleventh_automated_review(t
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))

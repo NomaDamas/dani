@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from dani.agent_runner import AgentRunner
 from dani.errors import RolloutMissingError, TransientCapacityError
 from dani.omo_runner import OmoRunner
 
@@ -369,6 +370,7 @@ def test_dani_service_recovers_late_session_id_from_omo_runner_after_wait(
         storage=storage,
         github=cast(GitHubCLI, github_stub),
         dev_syncer=FakeGitDevSyncer(),
+        omx_runner=cast(AgentRunner, OmoRunner(config.run_dir)),
     )
     service.register_repo("acme/demo", str(tmp_path))
 
@@ -393,8 +395,25 @@ def test_dani_service_recovers_late_session_id_from_omo_runner_after_wait(
     )
 
 
-def test_build_agent_runner_factory_returns_omo_runner(tmp_path: Path) -> None:
+def test_build_agent_runner_factory_returns_omo_http_runner_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from dani.agent_runner import build_agent_runner
+    from dani.omo_http_runner import OmoHttpRunner
+
+    monkeypatch.delenv("DANI_OMO_LEGACY_SUBPROCESS", raising=False)
+
+    runner = build_agent_runner("omo", tmp_path / "runs")
+
+    assert isinstance(runner, OmoHttpRunner)
+
+
+def test_build_agent_runner_factory_returns_legacy_omo_runner_when_env_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.agent_runner import build_agent_runner
+
+    monkeypatch.setenv("DANI_OMO_LEGACY_SUBPROCESS", "1")
 
     runner = build_agent_runner("omo", tmp_path / "runs")
 
@@ -532,9 +551,32 @@ def test_omo_runner_resume_also_applies_ultrawork_prefix(monkeypatch: pytest.Mon
     assert captured_prompts == ["ultrawork\n\nContinue fixing"]
 
 
-def test_dani_service_instantiates_omo_runner_when_config_agent_runtime_is_omo(tmp_path: Path) -> None:
+def test_dani_service_instantiates_omo_http_runner_when_config_agent_runtime_is_omo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import DaniConfig
+    from dani.omo_http_runner import OmoHttpRunner
+    from dani.service import DaniService
+
+    monkeypatch.delenv("DANI_OMO_LEGACY_SUBPROCESS", raising=False)
+
+    config = DaniConfig(
+        data_dir=tmp_path / ".dani",
+        webhook_secret="unit-test-secret",
+        agent_runtime="omo",
+    )
+    service = DaniService(config)
+
+    assert isinstance(service.omx_runner, OmoHttpRunner)
+
+
+def test_dani_service_instantiates_legacy_omo_runner_when_env_forces_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from dani.models import DaniConfig
     from dani.service import DaniService
+
+    monkeypatch.setenv("DANI_OMO_LEGACY_SUBPROCESS", "1")
 
     config = DaniConfig(
         data_dir=tmp_path / ".dani",
@@ -622,6 +664,7 @@ def test_dani_service_runs_issue_request_through_omo_runner_end_to_end(
         storage=storage,
         github=cast(GitHubCLI, github_stub),
         dev_syncer=FakeGitDevSyncer(),
+        omx_runner=cast(AgentRunner, OmoRunner(config.run_dir)),
     )
     service.register_repo("acme/demo", str(tmp_path))
 
@@ -721,6 +764,7 @@ def test_dani_service_resumes_opencode_session_on_issue_followup_end_to_end(
         storage=storage,
         github=cast(GitHubCLI, github_stub),
         dev_syncer=FakeGitDevSyncer(),
+        omx_runner=cast(AgentRunner, OmoRunner(config.run_dir)),
     )
     service.register_repo("acme/demo", str(tmp_path))
 
@@ -855,6 +899,7 @@ def test_dani_service_handles_opencode_session_missing_on_followup_resume(
         storage=storage,
         github=cast(GitHubCLI, github_stub),
         dev_syncer=FakeGitDevSyncer(),
+        omx_runner=cast(AgentRunner, OmoRunner(config.run_dir)),
     )
     service.register_repo("acme/demo", str(tmp_path))
 
