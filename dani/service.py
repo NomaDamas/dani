@@ -24,6 +24,8 @@ from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
 
+RETARGET_REQUEST_STAGE = "retarget_request"
+
 RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
 
 logger = logging.getLogger(__name__)
@@ -160,6 +162,9 @@ class DaniService:
 
         if stage == "final_verdict" and signature.get("verdict") == "APPROVE":
             return self._handle_final_verdict_agent_event(event, signature)
+
+        if stage == RETARGET_REQUEST_STAGE:
+            return {"status": "ignored", "reason": "retarget_request_no_action"}
 
         return {"status": "updated", "stage": stage}
 
@@ -952,6 +957,26 @@ class DaniService:
             self.github.find_comments_by_signature(repo_full_name, pr_number, kind="pr", signature_fragment=signature)
         )
 
+    def _post_retarget_request_if_missing(self, repo: RepoConfig, event: NormalizedEvent) -> None:
+        pr_number = event.number
+        signature = build_signature(stage=RETARGET_REQUEST_STAGE, pr=pr_number)
+        if self._has_exact_pr_signature(repo.full_name, pr_number, signature):
+            return
+        body = (
+            f"Thanks for the contribution! \U0001f64f\n\n"
+            f"This repository's automation only reviews pull requests that target the "
+            f"`{repo.dev_branch}` branch (this PR currently targets `{event.base_branch}`). "
+            f"Please change the base branch to `{repo.dev_branch}` so dani can pick it up "
+            f"for automated review.\n\n"
+            f'GitHub UI \u2192 click "Edit" next to the PR title \u2192 change the base '
+            f"branch to `{repo.dev_branch}`, then push (or reopen) the PR.\n\n"
+            f"{signature}"
+        )
+        try:
+            self.github.create_pr_comment(repo.full_name, pr_number, body)
+        except Exception:
+            logger.warning("failed to post retarget-to-dev comment for %s#%s", repo.full_name, pr_number, exc_info=True)
+
     def _has_exact_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> bool:
         return bool(
             self.github.find_comments_by_signature(
@@ -1051,6 +1076,10 @@ class DaniService:
     def _queue_pull_request_review(
         self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
     ) -> dict[str, Any]:
+        is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
+        if not is_agent_managed_pr and event.base_branch is not None and event.base_branch != repo.dev_branch:
+            self._post_retarget_request_if_missing(repo, event)
+            return {"status": "ignored", "reason": "non_dev_target_branch"}
         if event.base_branch == repo.main_branch:
             return {"status": "ignored", "reason": "release_loop_excluded"}
         issue_number = None
@@ -1060,7 +1089,6 @@ class DaniService:
                 self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
         if issue_number is None:
             issue_number = self._extract_issue_number(event.body)
-        is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
         if is_agent_managed_pr:
             if event.action != "opened":
                 return {"status": "ignored", "reason": "agent_managed_pr_followup"}

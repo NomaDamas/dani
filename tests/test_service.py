@@ -1539,8 +1539,8 @@ def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_p
     assert only_job.stage == "issue_request"
 
 
-def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
-    service, _, _ = make_service(tmp_path)
+def test_external_pr_to_main_posts_retarget_comment_and_is_ignored(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1558,7 +1558,122 @@ def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
         )
     )
 
+    assert result == {"status": "ignored", "reason": "non_dev_target_branch"}
+    posted = github.pr_comment_map.get(("acme/demo", 13), [])
+    assert len(posted) == 1
+    assert "<!-- dani:stage=retarget_request;pr=13 -->" in posted[0]["body"]
+    assert "`dev`" in posted[0]["body"]
+    assert "`main`" in posted[0]["body"]
+
+
+def test_external_pr_to_non_dev_feature_branch_posts_retarget_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=14,
+            actor_login="contributor",
+            payload={},
+            body="some body",
+            title="External feature PR",
+            base_branch="feature/legacy",
+            head_branch="contributor:fix",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "non_dev_target_branch"}
+    posted = github.pr_comment_map.get(("acme/demo", 14), [])
+    assert len(posted) == 1
+    assert "`feature/legacy`" in posted[0]["body"]
+
+
+def test_external_pr_retarget_comment_is_idempotent_across_resyncs(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    base_event = NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action="opened",
+        number=15,
+        actor_login="contributor",
+        payload={},
+        body="contribution",
+        title="External PR",
+        base_branch="main",
+        head_branch="contributor:fix",
+        is_pull_request=True,
+    )
+
+    service.handle_event(base_event)
+    sync_event = NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action="synchronize",
+        number=15,
+        actor_login="contributor",
+        payload={},
+        body="contribution",
+        title="External PR",
+        base_branch="main",
+        head_branch="contributor:fix",
+        is_pull_request=True,
+    )
+    service.handle_event(sync_event)
+    service.handle_event(sync_event)
+
+    posted = github.pr_comment_map.get(("acme/demo", 15), [])
+    assert len(posted) == 1, f"retarget comment must post exactly once across re-fires; got {len(posted)} comments"
+
+
+def test_agent_managed_pr_to_main_does_not_post_retarget_comment(tmp_path: Path) -> None:
+    from dani.signatures import build_signature as _build_sig
+
+    service, github, _ = make_service(tmp_path)
+    agent_signature = _build_sig(stage="implementation", job="agent-job", issue=99, pr=16)
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=16,
+            actor_login="dani-bot",
+            payload={},
+            body=f"Implementation PR\n\n{agent_signature}",
+            title="Agent PR to main (defensive)",
+            base_branch="main",
+            head_branch="feature/#99",
+            is_pull_request=True,
+        )
+    )
+
     assert result == {"status": "ignored", "reason": "release_loop_excluded"}
+    posted = github.pr_comment_map.get(("acme/demo", 16), [])
+    assert posted == [], "agent-managed PR to main must not get the retarget comment"
+
+
+def test_dani_retarget_comment_received_back_is_ignored_no_action(tmp_path: Path) -> None:
+    from dani.signatures import build_signature as _build_sig
+
+    service, _, _ = make_service(tmp_path)
+    retarget_sig = _build_sig(stage="retarget_request", pr=17)
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=17,
+            actor_login="dani-bot",
+            payload={},
+            body=f"Thanks for the contribution!\n\n{retarget_sig}",
+            title="External PR",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "retarget_request_no_action"}
 
 
 def test_main_push_queues_dev_sync(tmp_path: Path) -> None:
