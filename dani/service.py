@@ -1077,6 +1077,9 @@ class DaniService:
         self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
     ) -> dict[str, Any]:
         is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
+        is_release_pr = event.head_branch == repo.dev_branch and event.base_branch == repo.main_branch
+        if is_release_pr:
+            return {"status": "ignored", "reason": "release_loop_excluded"}
         if not is_agent_managed_pr and event.base_branch is not None and event.base_branch != repo.dev_branch:
             self._post_retarget_request_if_missing(repo, event)
             return {"status": "ignored", "reason": "non_dev_target_branch"}

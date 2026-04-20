@@ -1676,6 +1676,63 @@ def test_dani_retarget_comment_received_back_is_ignored_no_action(tmp_path: Path
     assert result == {"status": "ignored", "reason": "retarget_request_no_action"}
 
 
+def test_release_pr_from_dev_to_main_is_silently_ignored_no_retarget_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=18,
+            actor_login="maintainer",
+            payload={},
+            body="Release dev into main",
+            title="Release PR",
+            base_branch="main",
+            head_branch="dev",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "release_loop_excluded"}
+    assert github.pr_comment_map.get(("acme/demo", 18), []) == [], (
+        "release PR (dev -> main) must not trigger a retarget comment"
+    )
+
+
+def test_external_fork_pr_to_dev_proceeds_to_review_round(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=19,
+            actor_login="outside-contributor",
+            payload={"pull_request": {"head": {"sha": "fork-sha-19"}}},
+            body="Fixes a bug in the docs\n\nCloses #42",
+            title="Docs fix from fork",
+            base_branch="dev",
+            head_branch="fix/docs",
+            commit_sha="fork-sha-19",
+            is_pull_request=True,
+        )
+    )
+
+    assert result.get("status") == "queued"
+    assert result.get("stage") == "review_round"
+    assert github.pr_comment_map.get(("acme/demo", 19), []) == [], (
+        "external PR already targeting dev must not get a retarget comment"
+    )
+    jobs = [job for job in service.storage.list_jobs() if job.pr_number == 19]
+    assert jobs, "external fork PR to dev should enqueue a review_round job"
+    assert jobs[0].metadata.get("external_contribution") is True, (
+        "external fork PR must be flagged external_contribution=True in job metadata"
+    )
+
+
 def test_main_push_queues_dev_sync(tmp_path: Path) -> None:
     dev_syncer = FakeGitDevSyncer()
     service, _, _ = make_service(tmp_path, dev_syncer=dev_syncer)
