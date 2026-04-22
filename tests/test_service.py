@@ -4,14 +4,15 @@ from typing import cast
 
 import pytest
 
-from dani.errors import RolloutMissingError
+from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, JobRecord, NormalizedEvent
+from dani.models import RUNTIME_OMO, RUNTIME_OMX, DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
 from dani.service import DaniService
+from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
+from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner, FakeRuntimeRunner
 
 TEST_SECRET = "unit-test-secret"
 
@@ -55,6 +56,40 @@ def make_service(
     )
     service.register_repo("acme/demo", str(tmp_path))
     return service, github, omx_runner
+
+
+def make_omo_preferred_service(
+    tmp_path: Path,
+    *,
+    dev_syncer: FakeGitDevSyncer | None = None,
+    bridge_context: BridgeContext | None = None,
+) -> tuple[DaniService, FakeGitHubCLI, FakeRuntimeRunner, FakeRuntimeRunner]:
+    class StubBridge:
+        def __init__(self, context: BridgeContext | None) -> None:
+            self.context = context
+            self.calls: list[tuple[str, str | None]] = []
+
+        def load(self, *, repo_path: Path, session_id: str | None = None) -> BridgeContext | None:
+            self.calls.append((str(repo_path), session_id))
+            return self.context
+
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omo_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMO)
+    omx_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    bridge = StubBridge(bridge_context)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(OmxRunner, omo_runner),
+        dev_syncer=dev_syncer or FakeGitDevSyncer(),
+        runtime_runners={RUNTIME_OMX: cast(OmxRunner, omx_runner)},
+        session_bridge=cast(OmoSessionBridge, bridge),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+    return service, github, omo_runner, omx_runner
 
 
 def make_pr_event(
@@ -223,6 +258,155 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
 
     assert result == {"status": "ignored", "reason": "missing_issue_session"}
     assert omx_runner.resumes == []
+
+
+def test_issue_request_falls_back_from_omo_to_omx_on_claude_session_limit(tmp_path: Path) -> None:
+    bridge_context = BridgeContext(
+        prompt_block="Prior OMO context (imported summary; not a native resume):\n- Open thread: finish edge cases",
+        source_session_id="ses_prior_123",
+        note="from_test",
+    )
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, bridge_context=bridge_context)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Claude usage limit reached",
+            "Claude usage limit reached",
+            "session_window",
+            reset_hint="in 5 hours",
+            suggested_retry_at="2026-04-22T08:00:00+00:00",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=51,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=51)[0]
+    sessions = service.storage.list_sessions()
+    assert job.status == "completed"
+    assert job.metadata["preferred_runtime"] == RUNTIME_OMO
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["fallback_reason"] == "claude_session_window_limit"
+    assert job.metadata["usage_limit_kind"] == "session_window"
+    assert job.metadata["bridge_source_session_id"] == "ses_prior_123"
+    assert len(omo_runner.launches) == 1
+    assert len(omx_runner.launches) == 1
+    assert "Prior OMO context" in omx_runner.launches[0]["prompt"]
+    assert "not a native resume" in omx_runner.launches[0]["prompt"]
+    assert [session.effective_runtime for session in sessions] == [RUNTIME_OMO, RUNTIME_OMX]
+    assert sessions[0].status == "failed"
+    assert sessions[1].status == "completed"
+
+
+def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_omx(tmp_path: Path) -> None:
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+    service.storage.create_job(
+        JobRecord(
+            repo_full_name="acme/demo",
+            stage="issue_request",
+            issue_number=1,
+            status="failed",
+            metadata={
+                "usage_limit_runtime": RUNTIME_OMO,
+                "usage_limit_kind": "weekly",
+                "usage_limit_until": "2099-01-01T00:00:00+00:00",
+            },
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=52,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=52)[0]
+    assert job.status == "completed"
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["fallback_reason"] == "cached_claude_usage_limit"
+    assert omo_runner.launches == []
+    assert len(omx_runner.launches) == 1
+
+
+def test_issue_followup_after_omo_fallback_continues_on_omx_session(tmp_path: Path) -> None:
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Opus weekly limit reached",
+            "weekly limit reached",
+            "weekly",
+            reset_hint="next week",
+            suggested_retry_at="2026-04-29T00:00:00+00:00",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=53,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=53,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please continue on the latest plan.",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    followup_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=53)[0]
+    assert result["stage"] == "issue_followup"
+    assert followup_job.status == "completed"
+    assert followup_job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert len(omo_runner.resumes) == 0
+    assert len(omx_runner.resumes) == 1
+    assert omx_runner.resumes[0]["job"].stage == "issue_followup"
+
+
+def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_path: Path) -> None:
+    service, _, _, _ = make_omo_preferred_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
+
+    omx_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMX)
+    omo_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+
+    assert "$ralph" in omx_prompt
+    assert "$ralph" not in omo_prompt
+    assert "ultrawork" in omo_prompt
 
 
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -1544,6 +1728,44 @@ def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
     assert jobs[0].status == "completed"
+
+
+def test_dev_sync_conflict_falls_back_from_omo_to_omx_on_weekly_limit(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer(conflict=True)
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, dev_syncer=dev_syncer)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Opus weekly limit reached",
+            "weekly limit reached",
+            "weekly",
+            reset_hint="next week",
+            suggested_retry_at="2026-04-29T00:00:00+00:00",
+        )
+    )
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="branch_push",
+            repo_full_name="acme/demo",
+            action="push",
+            number=0,
+            actor_login="human",
+            payload={},
+            ref="refs/heads/main",
+            commit_sha="abc123",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")[0]
+    assert result["stage"] == "dev_sync"
+    assert job.status == "completed"
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["usage_limit_kind"] == "weekly"
+    assert len(omo_runner.launches) == 1
+    assert len(omx_runner.launches) == 1
+    assert len(dev_syncer.verify_calls) == 1
+    assert len(dev_syncer.cleanup_calls) == 1
 
 
 def test_review_round_stops_when_pr_is_closed(tmp_path: Path) -> None:

@@ -5,6 +5,16 @@ from typing import Protocol, TextIO, runtime_checkable
 
 from dani.models import JobRecord, SessionRecord
 
+RUNTIME_ALIASES: dict[str, str] = {
+    "omx": "omx",
+    "oh-my-codex": "omx",
+    "codex": "omx",
+    "omo": "omo",
+    "oh-my-openagents": "omo",
+    "oh-my-openagent": "omo",
+    "opencode": "omo",
+}
+
 
 class ManagedProcess(Protocol):
     def poll(self) -> object: ...
@@ -51,15 +61,23 @@ class AgentRunner(Protocol):
     def get_session_id(self, runtime_handle: str) -> str | None: ...
 
 
+def normalize_runtime(runtime: str | None) -> str:
+    normalized = (runtime or "omx").strip().lower()
+    if normalized in RUNTIME_ALIASES:
+        return RUNTIME_ALIASES[normalized]
+    msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
+    raise ValueError(msg)
+
+
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
     """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``)."""
     from dani.omo_runner import OmoRunner
     from dani.omx_runner import OmxRunner
 
-    normalized = (runtime or "omx").strip().lower()
-    if normalized in {"omx", "oh-my-codex", "codex"}:
+    normalized = normalize_runtime(runtime)
+    if normalized == "omx":
         return OmxRunner(run_dir)
-    if normalized in {"omo", "oh-my-openagents", "oh-my-openagent", "opencode"}:
+    if normalized == "omo":
         return OmoRunner(run_dir)
     msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
     raise ValueError(msg)
