@@ -497,7 +497,7 @@ class DaniService:
             bridge_prompt=(bridge_context.prompt_block if bridge_context else ""),
         )
         runner = self._runner_for_runtime(runtime)
-        if resume_session is not None and effective_session_runtime(resume_session) == runtime:
+        if resume_session is not None and self._resume_runtime_for_session(resume_session) == runtime:
             session = runner.resume(Path(repo.local_path), job, prompt, self._session_id_for_resume(job, resume_session))
         else:
             session = runner.launch(Path(repo.local_path), job, prompt)
@@ -616,9 +616,7 @@ class DaniService:
         lineage_session: SessionRecord | None,
     ) -> str:
         if job.stage == "issue_followup" and lineage_session is not None:
-            lineage_runtime = effective_session_runtime(lineage_session)
-            if lineage_runtime:
-                return lineage_runtime
+            return self._resume_runtime_for_session(lineage_session)
         if preferred_runtime != RUNTIME_OMO:
             return preferred_runtime
         if self._has_active_omo_usage_limit(job.repo_full_name):
@@ -650,6 +648,17 @@ class DaniService:
         if session.omx_session_id:
             return session.omx_session_id
         return self._omx_session_id_for(job)
+
+    def _resume_runtime_for_session(self, session: SessionRecord) -> str:
+        explicit_runtime = session.effective_runtime or session.native_session_runtime or session.preferred_runtime
+        if explicit_runtime:
+            return normalize_runtime(explicit_runtime)
+        if session.omx_session_id and self.omx_runner.can_resume(session.omx_session_id):
+            return normalize_runtime(self.config.agent_runtime)
+        inferred_runtime = effective_session_runtime(session)
+        if inferred_runtime:
+            return inferred_runtime
+        return normalize_runtime(self.config.agent_runtime)
 
     def _bridge_context_for(
         self, repo: RepoConfig, job: JobRecord, lineage_session: SessionRecord | None
@@ -1439,9 +1448,7 @@ class DaniService:
         session = self._latest_issue_lineage_session(event.repo_full_name, event.number)
         if session is None or session.omx_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
-        lineage_runtime = effective_session_runtime(session) or session.preferred_runtime or normalize_runtime(
-            self.config.agent_runtime
-        )
+        lineage_runtime = self._resume_runtime_for_session(session)
         lineage_runner = self._runner_for_runtime(lineage_runtime)
         if not lineage_runner.can_resume(session.omx_session_id):
             rerouted_job = self._enqueue_job(
@@ -1506,21 +1513,11 @@ class DaniService:
         self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
     ) -> dict[str, Any]:
         is_agent_managed_pr = bool(signature and signature.get("stage") == "implementation")
-        is_release_pr = event.head_branch == repo.dev_branch and event.base_branch == repo.main_branch
-        if is_release_pr:
-            return {"status": "ignored", "reason": "release_loop_excluded"}
-        if not is_agent_managed_pr and event.base_branch is not None and event.base_branch != repo.dev_branch:
-            self._post_retarget_request_if_missing(repo, event)
-            return {"status": "ignored", "reason": "non_dev_target_branch"}
-        if event.base_branch == repo.main_branch:
-            return {"status": "ignored", "reason": "release_loop_excluded"}
-        issue_number = None
-        if signature and signature.get("issue"):
-            issue_number = int(signature["issue"])
-            if signature.get("job") and self.storage.get_job(signature["job"]) is not None:
-                self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
-        if issue_number is None:
-            issue_number = self._extract_issue_number(event.body)
+        guard_result = self._external_pull_request_guard(repo, event, is_agent_managed_pr=is_agent_managed_pr)
+        if guard_result is not None:
+            return guard_result
+
+        issue_number = self._pull_request_issue_number(event, signature)
         if is_agent_managed_pr:
             if event.action != "opened":
                 return {"status": "ignored", "reason": "agent_managed_pr_followup"}
@@ -1534,19 +1531,37 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
-        if self._external_contributor_account_too_new(event):
+        if issue_number is None:
+            return {"status": "ignored", "reason": "untracked_pr"}
+        return self._queue_external_pull_request_review(repo, event, issue_number=issue_number)
+
+    def _external_pull_request_guard(
+        self, repo: RepoConfig, event: NormalizedEvent, *, is_agent_managed_pr: bool
+    ) -> dict[str, Any] | None:
+        is_release_pr = event.head_branch == repo.dev_branch and event.base_branch == repo.main_branch
+        if is_release_pr:
+            return {"status": "ignored", "reason": "release_loop_excluded"}
+        if not is_agent_managed_pr and event.base_branch is not None and event.base_branch != repo.dev_branch:
+            self._post_retarget_request_if_missing(repo, event)
+            return {"status": "ignored", "reason": "non_dev_target_branch"}
+        if event.base_branch == repo.main_branch:
+            return {"status": "ignored", "reason": "release_loop_excluded"}
+        if not is_agent_managed_pr and self._external_contributor_account_too_new(event):
             event_key = self._external_pull_request_event_key(event)
             if not self.storage.record_processed_event(event_key):
                 return {"status": "ignored", "reason": "duplicate_external_pr_event"}
             return self._close_ineligible_external_pull_request(event)
+        return None
 
-        if issue_number is None:
-            return {"status": "ignored", "reason": "untracked_pr"}
-        return self._queue_external_pull_request_review(
-            repo,
-            event,
-            issue_number=issue_number,
-        )
+    def _pull_request_issue_number(
+        self, event: NormalizedEvent, signature: dict[str, str] | None
+    ) -> int | None:
+        if signature and signature.get("issue"):
+            issue_number = int(signature["issue"])
+            if signature.get("job") and self.storage.get_job(signature["job"]) is not None:
+                self.storage.update_job(signature["job"], status="completed", pr_number=event.number)
+            return issue_number
+        return self._extract_issue_number(event.body)
 
     def _queue_external_pull_request_review(
         self,
