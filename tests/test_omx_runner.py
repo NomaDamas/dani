@@ -139,3 +139,18 @@ def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollou
     finally:
         stdout_file.close()
         stderr_file.close()
+
+
+def test_omx_can_resume_uuid_like_session_id(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("019da16a-565d-7c81-98c9-4b7ff38a3f9b") is True
+
+
+def test_omx_can_resume_rejects_opencode_prefixed_session_id(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("ses_25afdf9c7ffekN3dovMQw6meL2") is False
+
+
+def test_omx_can_resume_rejects_empty_or_none_session_id(tmp_path: Path) -> None:
+    runner = OmxRunner(run_dir=tmp_path / "runs")
+    assert runner.can_resume("") is False

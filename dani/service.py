@@ -1433,8 +1433,30 @@ class DaniService:
         session = self._latest_issue_lineage_session(event.repo_full_name, event.number)
         if session is None or session.omx_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
-        if not self.omx_runner.can_resume(session.omx_session_id):
-            return self._queue_issue_request(repo, event)
+        lineage_runtime = effective_session_runtime(session) or session.preferred_runtime or normalize_runtime(
+            self.config.agent_runtime
+        )
+        lineage_runner = self._runner_for_runtime(lineage_runtime)
+        if not lineage_runner.can_resume(session.omx_session_id):
+            rerouted_job = self._enqueue_job(
+                repo,
+                stage="issue_request",
+                issue_number=event.number,
+                metadata={
+                    "title": event.title or "",
+                    "body": event.payload.get("issue", {}).get("body", ""),
+                    "comment_body": event.body or "",
+                    "rerouted_from": "issue_followup",
+                    "prior_session_id": session.omx_session_id,
+                    "preferred_runtime": session.preferred_runtime or normalize_runtime(self.config.agent_runtime),
+                    "effective_runtime": effective_session_runtime(session),
+                    "native_session_runtime": session.native_session_runtime,
+                    "fallback_reason": session.fallback_reason,
+                    "bridge_source_runtime": session.bridge_source_runtime,
+                    "bridge_source_session_id": session.bridge_source_session_id,
+                },
+            )
+            return {"status": "queued", "job_id": rerouted_job.id, "stage": rerouted_job.stage}
         job = self._enqueue_job(
             repo,
             stage="issue_followup",

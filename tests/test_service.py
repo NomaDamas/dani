@@ -4,7 +4,6 @@ from typing import cast
 
 import pytest
 
-<<<<<<< HEAD
 from dani.agent_runner import AgentRunner
 from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
@@ -475,6 +474,10 @@ def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_
     assert request_jobs, "expected a fresh issue_request to be enqueued when prior session id is non-resumable"
     assert not followup_jobs, "must NOT enqueue an issue_followup against an un-resumable session id"
     assert not omx_runner.resumes, "runner.resume must not be invoked when can_resume returned False"
+    new_job = next(job for job in request_jobs if job.id != legacy_session.job_id)
+    assert new_job.metadata["rerouted_from"] == "issue_followup"
+    assert new_job.metadata["prior_session_id"] == legacy_session_id
+    assert new_job.metadata["comment_body"] == "this is a fresh comment on a legacy issue"
     assert any(launch["job"].issue_number == 731 for launch in omx_runner.launches), (
         "runner.launch must run a fresh session for the legacy issue"
     )
