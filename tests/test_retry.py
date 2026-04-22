@@ -6,10 +6,15 @@ from unittest.mock import patch
 
 import pytest
 
-from dani.errors import TransientCapacityError, check_transient_capacity_error
+from dani.agent_runner import AgentRunner
+from dani.errors import (
+    ClaudeUsageLimitError,
+    TransientCapacityError,
+    check_claude_usage_limit_error,
+    check_transient_capacity_error,
+)
 from dani.github import GitHubCLI
 from dani.models import DaniConfig, NormalizedEvent
-from dani.omx_runner import OmxRunner
 from dani.service import RETRY_BACKOFF_SECONDS, DaniService
 from dani.storage import JsonStorage
 from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
@@ -30,7 +35,7 @@ def make_service(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -71,6 +76,27 @@ class TestCheckTransientCapacityError:
 
     def test_ignores_empty_string(self) -> None:
         check_transient_capacity_error("")
+
+
+class TestCheckClaudeUsageLimitError:
+    def test_detects_session_window_limit(self) -> None:
+        with pytest.raises(ClaudeUsageLimitError) as exc_info:
+            check_claude_usage_limit_error("Claude usage limit reached. Your limit will reset at 3 PM.")
+
+        assert exc_info.value.limit_type == "session_window"
+        assert exc_info.value.reset_hint == "3 PM"
+        assert exc_info.value.suggested_retry_at is not None
+
+    def test_detects_weekly_limit(self) -> None:
+        with pytest.raises(ClaudeUsageLimitError) as exc_info:
+            check_claude_usage_limit_error("Opus weekly limit reached. It resets on Monday morning.")
+
+        assert exc_info.value.limit_type == "weekly"
+        assert exc_info.value.reset_hint == "Monday morning"
+        assert exc_info.value.suggested_retry_at is not None
+
+    def test_ignores_generic_rate_limit_language(self) -> None:
+        check_claude_usage_limit_error("rate limit exceeded")
 
 
 # --- service.py retry integration tests ---

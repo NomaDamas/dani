@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from github.GithubException import GithubException
+from github.GithubException import GithubException, UnknownObjectException
 
 from dani.github import GitHubCLI, MergeConflictError
 
@@ -16,6 +16,7 @@ class FakeIssue:
     def __init__(self, comments: list[str] | None = None) -> None:
         self.comments = [FakeComment(body) for body in comments or []]
         self.created_comments: list[str] = []
+        self.labels: list[str] = []
         self.raw_data = {"number": 1}
 
     def get_comments(self) -> list[FakeComment]:
@@ -24,6 +25,14 @@ class FakeIssue:
     def create_comment(self, body: str) -> FakeComment:
         self.created_comments.append(body)
         return FakeComment(body)
+
+    def add_to_labels(self, label: str) -> None:
+        self.labels.append(label)
+
+
+class FakeLabel:
+    def __init__(self, name: str) -> None:
+        self.name = name
 
 
 class FakeBranchRef:
@@ -104,6 +113,8 @@ class FakeRepo:
         self.issues = {5: FakeIssue(["existing issue comment"])}
         self.pulls = {7: FakePullRequest(number=7, body="body", comments=["existing pr comment"])}
         self.created_pulls: list[dict[str, str]] = []
+        self.labels: dict[str, FakeLabel] = {}
+        self.created_labels: list[dict[str, str]] = []
 
     def get_issues(self, *, state: str) -> list[FakeIssue]:
         assert state == "open"
@@ -111,6 +122,17 @@ class FakeRepo:
 
     def get_issue(self, issue_number: int) -> FakeIssue:
         return self.issues[issue_number]
+
+    def get_label(self, label_name: str) -> FakeLabel:
+        if label_name not in self.labels:
+            raise UnknownObjectException(status=404, data={"message": "Not Found"}, headers={})
+        return self.labels[label_name]
+
+    def create_label(self, *, name: str, color: str, description: str) -> FakeLabel:
+        self.created_labels.append({"name": name, "color": color, "description": description})
+        label = FakeLabel(name)
+        self.labels[name] = label
+        return label
 
     def get_pull(self, pr_number: int) -> FakePullRequest:
         return self.pulls[pr_number]
@@ -173,6 +195,31 @@ def test_create_issue_and_pr_comments_use_repository_objects(fake_repo: FakeRepo
     assert pr_comment["body"] == "hello pr"
     assert fake_repo.issues[5].created_comments == ["hello issue"]
     assert fake_repo.pulls[7].created_issue_comments == ["hello pr"]
+
+
+def test_ensure_issue_label_creates_missing_label_and_adds_to_issue(fake_repo: FakeRepo) -> None:
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    github.ensure_issue_label("acme/demo", 5, "Implementing")
+
+    assert fake_repo.created_labels == [
+        {
+            "name": "Implementing",
+            "color": "FBCA04",
+            "description": "Implementation has started for this issue.",
+        }
+    ]
+    assert fake_repo.issues[5].labels == ["Implementing"]
+
+
+def test_ensure_issue_label_reuses_existing_label(fake_repo: FakeRepo) -> None:
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+    fake_repo.labels["Implementing"] = FakeLabel("Implementing")
+
+    github.ensure_issue_label("acme/demo", 5, "Implementing")
+
+    assert fake_repo.created_labels == []
+    assert fake_repo.issues[5].labels == ["Implementing"]
 
 
 def test_latest_signature_comment_ignores_opt_out_marker(fake_repo: FakeRepo) -> None:

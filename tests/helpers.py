@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, TypedDict
 
-from dani.errors import TransientCapacityError
+from dani.errors import ClaudeUsageLimitError, TransientCapacityError
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
@@ -21,6 +21,9 @@ class FakeGitHubCLI:
         self.open_issues: dict[str, list[dict[str, Any]]] = {}
         self.merged: list[tuple[str, int]] = []
         self.merge_conflicts: set[tuple[str, int]] = set()
+        self.issue_labels: dict[tuple[str, int], list[str]] = {}
+        self.users: dict[str, dict[str, Any]] = {}
+        self.closed_pull_requests: list[tuple[str, int]] = []
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -53,6 +56,9 @@ class FakeGitHubCLI:
             "base": {"ref": "dev"},
         }
 
+    def get_user(self, login: str) -> dict[str, Any]:
+        return dict(self.users.get(login, {"login": login}))
+
     def latest_signature_comment(
         self, repo_full_name: str, number: int, *, kind: str
     ) -> tuple[dict[str, Any], dict[str, str]] | None:
@@ -83,6 +89,11 @@ class FakeGitHubCLI:
         if (repo_full_name, pr_number) in self.merge_conflicts:
             raise MergeConflictError(repo_full_name, pr_number, status=409, message="merge conflict with base branch")
         self.merged.append((repo_full_name, pr_number))
+
+    def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
+        labels = self.issue_labels.setdefault((repo_full_name, issue_number), [])
+        if label not in labels:
+            labels.append(label)
 
     def add_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> None:
         self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append({"body": signature})
@@ -120,6 +131,7 @@ class FakeGitHubCLI:
         })
 
     def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        self.closed_pull_requests.append((repo_full_name, pr_number))
         for pr in self.prs.get(repo_full_name, []):
             if pr.get("number") == pr_number:
                 pr["state"] = "closed"
@@ -268,6 +280,84 @@ class FakeOmxRunner:
     def get_session_id(self, runtime_handle: str) -> str | None:
         del runtime_handle
         return None
+
+    def can_resume(self, session_id: str) -> bool:
+        return bool(session_id) and not session_id.startswith("ses_")
+
+
+class FakeRuntimeRunner(FakeOmxRunner):
+    def __init__(self, github: FakeGitHubCLI, *, runtime_name: str) -> None:
+        super().__init__(github)
+        self.runtime_name = runtime_name
+        self.session_id_prefix = "ses_" if runtime_name == "omo" else "omx-"
+        self.wait_errors: list[Exception] = []
+
+    def queue_wait_error(self, exc: Exception) -> None:
+        self.wait_errors.append(exc)
+
+    def launch(self, repo_path: Path, job: JobRecord, prompt: str) -> SessionRecord:
+        repo_full_name = job.repo_full_name
+        matches = re.findall(r"<!--\s*dani:([^>]+)\s*-->", prompt)
+        signature = parse_signature(f"<!-- dani:{matches[-1]} -->") if matches else None
+        pending_wait_error = self.wait_errors[0] if self.wait_errors else None
+        should_skip_side_effect = isinstance(pending_wait_error, (ClaudeUsageLimitError, TransientCapacityError))
+        if self._transient_failures_remaining == 0 and not should_skip_side_effect:
+            self._post_side_effect(repo_full_name, job, signature)
+        self.launches.append({"repo_path": str(repo_path), "job": job, "prompt": prompt})
+        return SessionRecord(
+            repo_full_name=repo_full_name,
+            stage=job.stage,
+            runtime_handle=f"{self.runtime_name}-runtime-{job.id}",
+            prompt_path=str(repo_path / "prompt.txt"),
+            script_path=str(repo_path / "run.sh"),
+            worktree_path=str(repo_path),
+            job_id=job.id,
+            issue_number=job.issue_number,
+            pr_number=job.pr_number,
+            review_round=job.review_round,
+            omx_session_id=f"{self.session_id_prefix}{job.id}",
+        )
+
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        if self.resume_error is not None:
+            raise self.resume_error
+        issue_number = job.issue_number or 0
+        self.github.add_issue_signature(
+            job.repo_full_name,
+            issue_number,
+            build_signature(stage="issue_followup", job=job.id, issue=issue_number),
+        )
+        self.resumes.append({
+            "repo_path": str(repo_path),
+            "job": job,
+            "prompt": prompt,
+            "omx_session_id": omx_session_id,
+        })
+        return SessionRecord(
+            repo_full_name=job.repo_full_name,
+            stage=job.stage,
+            runtime_handle=f"{self.runtime_name}-runtime-{job.id}",
+            prompt_path=str(repo_path / "prompt.txt"),
+            script_path=str(repo_path / "run.sh"),
+            worktree_path=str(repo_path),
+            job_id=job.id,
+            issue_number=job.issue_number,
+            pr_number=job.pr_number,
+            review_round=job.review_round,
+            omx_session_id=omx_session_id,
+        )
+
+    def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+        del poll_interval, timeout_seconds
+        if self.wait_errors:
+            raise self.wait_errors.pop(0)
+        return super().wait(runtime_handle)
+
+    def get_session_id(self, runtime_handle: str) -> str | None:
+        suffix = runtime_handle.removeprefix(f"{self.runtime_name}-runtime-")
+        if not suffix:
+            return None
+        return f"{self.session_id_prefix}{suffix}"
 
 
 class FakeGitDevSyncer:

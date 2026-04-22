@@ -4,14 +4,16 @@ from typing import cast
 
 import pytest
 
-from dani.errors import RolloutMissingError
+from dani.agent_runner import AgentRunner
+from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, JobRecord, NormalizedEvent
+from dani.models import RUNTIME_OMO, RUNTIME_OMX, DaniConfig, JobRecord, NormalizedEvent
 from dani.omx_runner import OmxRunner
 from dani.service import DaniService
+from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
+from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner, FakeRuntimeRunner
 
 TEST_SECRET = "unit-test-secret"
 
@@ -50,11 +52,45 @@ def make_service(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
     return service, github, omx_runner
+
+
+def make_omo_preferred_service(
+    tmp_path: Path,
+    *,
+    dev_syncer: FakeGitDevSyncer | None = None,
+    bridge_context: BridgeContext | None = None,
+) -> tuple[DaniService, FakeGitHubCLI, FakeRuntimeRunner, FakeRuntimeRunner]:
+    class StubBridge:
+        def __init__(self, context: BridgeContext | None) -> None:
+            self.context = context
+            self.calls: list[tuple[str, str | None]] = []
+
+        def load(self, *, repo_path: Path, session_id: str | None = None) -> BridgeContext | None:
+            self.calls.append((str(repo_path), session_id))
+            return self.context
+
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omo_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMO)
+    omx_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    bridge = StubBridge(bridge_context)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(OmxRunner, omo_runner),
+        dev_syncer=dev_syncer or FakeGitDevSyncer(),
+        runtime_runners={RUNTIME_OMX: cast(OmxRunner, omx_runner)},
+        session_bridge=cast(OmoSessionBridge, bridge),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+    return service, github, omo_runner, omx_runner
 
 
 def make_pr_event(
@@ -225,6 +261,155 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
     assert omx_runner.resumes == []
 
 
+def test_issue_request_falls_back_from_omo_to_omx_on_claude_session_limit(tmp_path: Path) -> None:
+    bridge_context = BridgeContext(
+        prompt_block="Prior OMO context (imported summary; not a native resume):\n- Open thread: finish edge cases",
+        source_session_id="ses_prior_123",
+        note="from_test",
+    )
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, bridge_context=bridge_context)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Claude usage limit reached",
+            "Claude usage limit reached",
+            "session_window",
+            reset_hint="in 5 hours",
+            suggested_retry_at="2026-04-22T08:00:00+00:00",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=51,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=51)[0]
+    sessions = service.storage.list_sessions()
+    assert job.status == "completed"
+    assert job.metadata["preferred_runtime"] == RUNTIME_OMO
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["fallback_reason"] == "claude_session_window_limit"
+    assert job.metadata["usage_limit_kind"] == "session_window"
+    assert job.metadata["bridge_source_session_id"] == "ses_prior_123"
+    assert len(omo_runner.launches) == 1
+    assert len(omx_runner.launches) == 1
+    assert "Prior OMO context" in omx_runner.launches[0]["prompt"]
+    assert "not a native resume" in omx_runner.launches[0]["prompt"]
+    assert [session.effective_runtime for session in sessions] == [RUNTIME_OMO, RUNTIME_OMX]
+    assert sessions[0].status == "failed"
+    assert sessions[1].status == "completed"
+
+
+def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_omx(tmp_path: Path) -> None:
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+    service.storage.create_job(
+        JobRecord(
+            repo_full_name="acme/demo",
+            stage="issue_request",
+            issue_number=1,
+            status="failed",
+            metadata={
+                "usage_limit_runtime": RUNTIME_OMO,
+                "usage_limit_kind": "weekly",
+                "usage_limit_until": "2099-01-01T00:00:00+00:00",
+            },
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=52,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=52)[0]
+    assert job.status == "completed"
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["fallback_reason"] == "cached_claude_usage_limit"
+    assert omo_runner.launches == []
+    assert len(omx_runner.launches) == 1
+
+
+def test_issue_followup_after_omo_fallback_continues_on_omx_session(tmp_path: Path) -> None:
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Opus weekly limit reached",
+            "weekly limit reached",
+            "weekly",
+            reset_hint="next week",
+            suggested_retry_at="2026-04-29T00:00:00+00:00",
+        )
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=53,
+            actor_login="human",
+            payload={},
+            body="Need automation",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=53,
+            actor_login="human",
+            payload={"issue": {"body": "Need automation"}},
+            body="Please continue on the latest plan.",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    followup_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=53)[0]
+    assert result["stage"] == "issue_followup"
+    assert followup_job.status == "completed"
+    assert followup_job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert len(omo_runner.resumes) == 0
+    assert len(omx_runner.resumes) == 1
+    assert omx_runner.resumes[0]["job"].stage == "issue_followup"
+
+
+def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_path: Path) -> None:
+    service, _, _, _ = make_omo_preferred_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
+
+    omx_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMX)
+    omo_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+
+    assert "$ralph" in omx_prompt
+    assert "$ralph" not in omo_prompt
+    assert "ultrawork" in omo_prompt
+
+
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
@@ -235,6 +420,119 @@ def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) ->
     github.add_issue_signature("acme/demo", 31, expected_signature)
 
     service._verify_side_effect(repo, job)
+
+
+def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import SessionRecord
+
+    service, _, omx_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+
+    legacy_session_id = "019da0f4-6ef1-7923-811f-57eb3e93bd8e"
+    legacy_session = SessionRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_request",
+        runtime_handle="runtime-legacy",
+        prompt_path=str(tmp_path / "legacy-prompt.txt"),
+        script_path=str(tmp_path / "legacy.sh"),
+        worktree_path=str(tmp_path),
+        job_id="legacy-job-id",
+        issue_number=731,
+        omx_session_id=legacy_session_id,
+    )
+    service.storage.create_session(legacy_session)
+
+    monkeypatch.setattr(
+        omx_runner,
+        "can_resume",
+        lambda session_id: bool(session_id) and not session_id.startswith("019d"),
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=731,
+            actor_login="human",
+            payload={"issue": {"body": "fallback comment"}},
+            body="this is a fresh comment on a legacy issue",
+            title="Legacy followup",
+        )
+    )
+    service.wait_for_idle()
+
+    request_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_request" and job.issue_number == 731
+    ]
+    followup_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_followup" and job.issue_number == 731
+    ]
+    assert request_jobs, "expected a fresh issue_request to be enqueued when prior session id is non-resumable"
+    assert not followup_jobs, "must NOT enqueue an issue_followup against an un-resumable session id"
+    assert not omx_runner.resumes, "runner.resume must not be invoked when can_resume returned False"
+    new_job = next(job for job in request_jobs if job.id != legacy_session.job_id)
+    assert new_job.metadata["rerouted_from"] == "issue_followup"
+    assert new_job.metadata["prior_session_id"] == legacy_session_id
+    assert new_job.metadata["comment_body"] == "this is a fresh comment on a legacy issue"
+    assert any(launch["job"].issue_number == 731 for launch in omx_runner.launches), (
+        "runner.launch must run a fresh session for the legacy issue"
+    )
+
+
+def test_issue_comment_with_resumable_prior_session_still_resumes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from dani.models import SessionRecord
+
+    service, _, omx_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+
+    resumable_session_id = "ses_25ad70836ffemLP2sYPAkGq8hd"
+    resumable_session = SessionRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_request",
+        runtime_handle="runtime-resumable",
+        prompt_path=str(tmp_path / "prompt.txt"),
+        script_path=str(tmp_path / "run.sh"),
+        worktree_path=str(tmp_path),
+        job_id="resumable-job-id",
+        issue_number=732,
+        omx_session_id=resumable_session_id,
+    )
+    service.storage.create_session(resumable_session)
+
+    monkeypatch.setattr(
+        omx_runner,
+        "can_resume",
+        lambda session_id: bool(session_id) and session_id.startswith("ses_"),
+    )
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=732,
+            actor_login="human",
+            payload={"issue": {"body": "resume me"}},
+            body="continue please",
+            title="Resumable followup",
+        )
+    )
+    service.wait_for_idle()
+
+    followup_jobs = [
+        job for job in service.storage.list_jobs() if job.stage == "issue_followup" and job.issue_number == 732
+    ]
+    assert followup_jobs, "expected an issue_followup job when prior session id is resumable"
+    assert any(resume["omx_session_id"] == resumable_session_id for resume in omx_runner.resumes), (
+        "runner.resume must be invoked with the resumable session id"
+    )
 
 
 def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> None:
@@ -742,6 +1040,56 @@ def test_external_pr_review_requested_queues_review_round(tmp_path: Path) -> Non
     assert omx_runner.launches[-1]["job"].stage == "review_round"
 
 
+def test_external_pr_from_account_younger_than_one_year_is_closed(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.users["newcomer"] = {"login": "newcomer", "created_at": "3000-01-01T00:00:00Z"}
+
+    result = service.handle_event(
+        make_pr_event(pr_number=92, action="opened", body="Implements #21", actor_login="newcomer")
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "closed", "reason": "contributor_account_too_new", "pr_number": 92}
+    assert github.closed_pull_requests == [("acme/demo", 92)]
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=92) == []
+    assert omx_runner.launches == []
+    comments = github.pr_comments("acme/demo", 92)
+    assert len(comments) == 1
+    assert "at least one year old" in comments[0]["body"]
+    assert "open an issue instead" in comments[0]["body"]
+
+
+def test_external_pr_uses_pull_request_author_created_at_instead_of_sender(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    github.users["maintainer"] = {"login": "maintainer", "created_at": "2000-01-01T00:00:00Z"}
+    event = make_pr_event(pr_number=93, action="reopened", body="Implements #21", actor_login="maintainer")
+    event.payload["pull_request"]["user"] = {
+        "login": "newcomer",
+        "created_at": "3000-01-01T00:00:00Z",
+    }
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "closed", "reason": "contributor_account_too_new", "pr_number": 93}
+    assert github.closed_pull_requests == [("acme/demo", 93)]
+
+
+def test_external_pr_from_account_at_least_one_year_old_queues_review_round(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.users["veteran"] = {"login": "veteran", "created_at": "2000-01-01T00:00:00Z"}
+
+    result = service.handle_event(
+        make_pr_event(pr_number=94, action="opened", body="Implements #21", actor_login="veteran")
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    assert github.closed_pull_requests == []
+    assert all("at least one year old" not in comment["body"] for comment in github.pr_comments("acme/demo", 94))
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
 def test_external_review_comment_does_not_queue_implementation(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
@@ -902,7 +1250,7 @@ def test_external_pr_unique_activity_never_queues_an_eleventh_automated_review(t
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -1430,8 +1778,8 @@ def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_p
     assert only_job.stage == "issue_request"
 
 
-def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
-    service, _, _ = make_service(tmp_path)
+def test_external_pr_to_main_posts_retarget_comment_and_is_ignored(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1449,7 +1797,179 @@ def test_pull_request_opened_to_main_is_ignored(tmp_path: Path) -> None:
         )
     )
 
+    assert result == {"status": "ignored", "reason": "non_dev_target_branch"}
+    posted = github.pr_comment_map.get(("acme/demo", 13), [])
+    assert len(posted) == 1
+    assert "<!-- dani:stage=retarget_request;pr=13 -->" in posted[0]["body"]
+    assert "`dev`" in posted[0]["body"]
+    assert "`main`" in posted[0]["body"]
+
+
+def test_external_pr_to_non_dev_feature_branch_posts_retarget_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=14,
+            actor_login="contributor",
+            payload={},
+            body="some body",
+            title="External feature PR",
+            base_branch="feature/legacy",
+            head_branch="contributor:fix",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "non_dev_target_branch"}
+    posted = github.pr_comment_map.get(("acme/demo", 14), [])
+    assert len(posted) == 1
+    assert "`feature/legacy`" in posted[0]["body"]
+
+
+def test_external_pr_retarget_comment_is_idempotent_across_resyncs(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    base_event = NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action="opened",
+        number=15,
+        actor_login="contributor",
+        payload={},
+        body="contribution",
+        title="External PR",
+        base_branch="main",
+        head_branch="contributor:fix",
+        is_pull_request=True,
+    )
+
+    service.handle_event(base_event)
+    sync_event = NormalizedEvent(
+        kind="pull_request_opened",
+        repo_full_name="acme/demo",
+        action="synchronize",
+        number=15,
+        actor_login="contributor",
+        payload={},
+        body="contribution",
+        title="External PR",
+        base_branch="main",
+        head_branch="contributor:fix",
+        is_pull_request=True,
+    )
+    service.handle_event(sync_event)
+    service.handle_event(sync_event)
+
+    posted = github.pr_comment_map.get(("acme/demo", 15), [])
+    assert len(posted) == 1, f"retarget comment must post exactly once across re-fires; got {len(posted)} comments"
+
+
+def test_agent_managed_pr_to_main_does_not_post_retarget_comment(tmp_path: Path) -> None:
+    from dani.signatures import build_signature as _build_sig
+
+    service, github, _ = make_service(tmp_path)
+    agent_signature = _build_sig(stage="implementation", job="agent-job", issue=99, pr=16)
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=16,
+            actor_login="dani-bot",
+            payload={},
+            body=f"Implementation PR\n\n{agent_signature}",
+            title="Agent PR to main (defensive)",
+            base_branch="main",
+            head_branch="feature/#99",
+            is_pull_request=True,
+        )
+    )
+
     assert result == {"status": "ignored", "reason": "release_loop_excluded"}
+    posted = github.pr_comment_map.get(("acme/demo", 16), [])
+    assert posted == [], "agent-managed PR to main must not get the retarget comment"
+
+
+def test_dani_retarget_comment_received_back_is_ignored_no_action(tmp_path: Path) -> None:
+    from dani.signatures import build_signature as _build_sig
+
+    service, _, _ = make_service(tmp_path)
+    retarget_sig = _build_sig(stage="retarget_request", pr=17)
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=17,
+            actor_login="dani-bot",
+            payload={},
+            body=f"Thanks for the contribution!\n\n{retarget_sig}",
+            title="External PR",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "retarget_request_no_action"}
+
+
+def test_release_pr_from_dev_to_main_is_silently_ignored_no_retarget_comment(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=18,
+            actor_login="maintainer",
+            payload={},
+            body="Release dev into main",
+            title="Release PR",
+            base_branch="main",
+            head_branch="dev",
+            is_pull_request=True,
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "release_loop_excluded"}
+    assert github.pr_comment_map.get(("acme/demo", 18), []) == [], (
+        "release PR (dev -> main) must not trigger a retarget comment"
+    )
+
+
+def test_external_fork_pr_to_dev_proceeds_to_review_round(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=19,
+            actor_login="outside-contributor",
+            payload={"pull_request": {"head": {"sha": "fork-sha-19"}}},
+            body="Fixes a bug in the docs\n\nCloses #42",
+            title="Docs fix from fork",
+            base_branch="dev",
+            head_branch="fix/docs",
+            commit_sha="fork-sha-19",
+            is_pull_request=True,
+        )
+    )
+
+    assert result.get("status") == "queued"
+    assert result.get("stage") == "review_round"
+    assert github.pr_comment_map.get(("acme/demo", 19), []) == [], (
+        "external PR already targeting dev must not get a retarget comment"
+    )
+    jobs = [job for job in service.storage.list_jobs() if job.pr_number == 19]
+    assert jobs, "external fork PR to dev should enqueue a review_round job"
+    assert jobs[0].metadata.get("external_contribution") is True, (
+        "external fork PR must be flagged external_contribution=True in job metadata"
+    )
 
 
 def test_main_push_queues_dev_sync(tmp_path: Path) -> None:
@@ -1544,6 +2064,44 @@ def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
     assert jobs[0].status == "completed"
+
+
+def test_dev_sync_conflict_falls_back_from_omo_to_omx_on_weekly_limit(tmp_path: Path) -> None:
+    dev_syncer = FakeGitDevSyncer(conflict=True)
+    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, dev_syncer=dev_syncer)
+    omo_runner.queue_wait_error(
+        ClaudeUsageLimitError(
+            "Opus weekly limit reached",
+            "weekly limit reached",
+            "weekly",
+            reset_hint="next week",
+            suggested_retry_at="2026-04-29T00:00:00+00:00",
+        )
+    )
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="branch_push",
+            repo_full_name="acme/demo",
+            action="push",
+            number=0,
+            actor_login="human",
+            payload={},
+            ref="refs/heads/main",
+            commit_sha="abc123",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")[0]
+    assert result["stage"] == "dev_sync"
+    assert job.status == "completed"
+    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["usage_limit_kind"] == "weekly"
+    assert len(omo_runner.launches) == 1
+    assert len(omx_runner.launches) == 1
+    assert len(dev_syncer.verify_calls) == 1
+    assert len(dev_syncer.cleanup_calls) == 1
 
 
 def test_review_round_stops_when_pr_is_closed(tmp_path: Path) -> None:
