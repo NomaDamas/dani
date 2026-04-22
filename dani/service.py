@@ -498,7 +498,9 @@ class DaniService:
         )
         runner = self._runner_for_runtime(runtime)
         if resume_session is not None and self._resume_runtime_for_session(resume_session) == runtime:
-            session = runner.resume(Path(repo.local_path), job, prompt, self._session_id_for_resume(job, resume_session))
+            session = runner.resume(
+                Path(repo.local_path), job, prompt, self._session_id_for_resume(job, resume_session)
+            )
         else:
             session = runner.launch(Path(repo.local_path), job, prompt)
 
@@ -904,8 +906,10 @@ class DaniService:
                 self.dev_syncer.cleanup(conflict_context)
 
     def _finalize_session(self, session: SessionRecord, *, status: str, termination_reason: str) -> None:
-        runtime = effective_session_runtime(session) or session.native_session_runtime or normalize_runtime(
-            self.config.agent_runtime
+        runtime = (
+            effective_session_runtime(session)
+            or session.native_session_runtime
+            or normalize_runtime(self.config.agent_runtime)
         )
         runner = self._runner_for_runtime(runtime)
         try:
@@ -936,7 +940,9 @@ class DaniService:
         pr_title = pr_snapshot.get("title", job.metadata.get("title", f"PR #{pr_number}"))
         pr_body = pr_snapshot.get("body", job.metadata.get("body", ""))
         if job.stage == "issue_request":
-            prompt = self._build_issue_request_prompt(repo, job, issue_number, issue_title, issue_body, resolved_runtime)
+            prompt = self._build_issue_request_prompt(
+                repo, job, issue_number, issue_title, issue_body, resolved_runtime
+            )
             return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "implementation":
@@ -1553,9 +1559,7 @@ class DaniService:
             return self._close_ineligible_external_pull_request(event)
         return None
 
-    def _pull_request_issue_number(
-        self, event: NormalizedEvent, signature: dict[str, str] | None
-    ) -> int | None:
+    def _pull_request_issue_number(self, event: NormalizedEvent, signature: dict[str, str] | None) -> int | None:
         if signature and signature.get("issue"):
             issue_number = int(signature["issue"])
             if signature.get("job") and self.storage.get_job(signature["job"]) is not None:

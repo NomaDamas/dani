@@ -63,7 +63,9 @@ class OmoSessionBridge:
             return BridgeContext(prompt_block="", source_session_id=source_session_id, note="opencode_context_empty")
         return BridgeContext(prompt_block=prompt_block, source_session_id=source_session_id)
 
-    def _select_session(self, conn: sqlite3.Connection, *, repo_path: Path, session_id: str | None) -> sqlite3.Row | None:
+    def _select_session(
+        self, conn: sqlite3.Connection, *, repo_path: Path, session_id: str | None
+    ) -> sqlite3.Row | None:
         if session_id:
             row = conn.execute(
                 "SELECT id, title, directory FROM session WHERE id = ? LIMIT 1",
