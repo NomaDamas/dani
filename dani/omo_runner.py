@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from dani.agent_runner import ManagedProcess
 from dani.errors import (
+    check_claude_usage_limit_error,
     check_opencode_session_missing_error,
     check_rollout_missing_error,
     check_transient_capacity_error,
@@ -55,7 +56,7 @@ class OmoRunner:
         with self._lock:
             self._processes[handle] = (process, stdout_file, stderr_file)
         omx_session_id = None
-        if job.stage == "issue_request":
+        if job.stage in {"issue_request", "issue_followup"}:
             omx_session_id = self._capture_session_id(stdout_path=stdout_path)
         del session_dir
         return SessionRecord(
@@ -200,11 +201,13 @@ class OmoRunner:
             stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
             check_rollout_missing_error(stderr_text)
             check_opencode_session_missing_error(stderr_text)
+            check_claude_usage_limit_error(stderr_text)
             check_transient_capacity_error(stderr_text)
         stdout_path = self.run_dir / runtime_handle / "stdout.log"
         if stdout_path.exists():
             stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
             check_opencode_session_missing_error(stdout_text)
+            check_claude_usage_limit_error(stdout_text)
             check_transient_capacity_error(stdout_text)
 
     def _capture_session_id(

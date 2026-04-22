@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from dani.models import DaniConfig, JobRecord, RepoConfig, SessionRecord, utc_now
+from dani.models import DaniConfig, JobRecord, RepoConfig, SessionRecord, effective_session_runtime, utc_now
 
 
 class JsonStorage:
@@ -146,6 +146,7 @@ class JsonStorage:
         issue_number: int | None = None,
         pr_number: int | None = None,
         require_omx_session_id: bool = False,
+        effective_runtime: str | None = None,
     ) -> SessionRecord | None:
         for session in reversed(self.list_sessions()):
             if session.repo_full_name != repo_full_name:
@@ -157,6 +158,8 @@ class JsonStorage:
             if pr_number is not None and session.pr_number != pr_number:
                 continue
             if require_omx_session_id and not session.omx_session_id:
+                continue
+            if effective_runtime is not None and effective_session_runtime(session) != effective_runtime:
                 continue
             return session
         return None
