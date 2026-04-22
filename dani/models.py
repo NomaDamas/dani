@@ -6,9 +6,20 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+RUNTIME_OMX = "omx"
+RUNTIME_OMO = "omo"
+
 
 def utc_now() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def infer_runtime_from_session_id(session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+    if session_id.startswith("ses_"):
+        return RUNTIME_OMO
+    return RUNTIME_OMX
 
 
 @dataclass(slots=True)
@@ -57,6 +68,12 @@ class SessionRecord:
     omx_session_id: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
+    preferred_runtime: str | None = None
+    effective_runtime: str | None = None
+    native_session_runtime: str | None = None
+    fallback_reason: str | None = None
+    bridge_source_runtime: str | None = None
+    bridge_source_session_id: str | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
     status: str = "launched"
     ended_at: str | None = None
@@ -66,6 +83,14 @@ class SessionRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def effective_session_runtime(session: SessionRecord) -> str | None:
+    if session.effective_runtime:
+        return session.effective_runtime
+    if session.native_session_runtime:
+        return session.native_session_runtime
+    return infer_runtime_from_session_id(session.omx_session_id)
 
 
 @dataclass(slots=True)
@@ -94,6 +119,7 @@ class DaniConfig:
     port: int = 8787
     review_rounds: int = 3
     external_review_limit: int = 10
+    agent_runtime: str = "omx"
 
     @property
     def registry_path(self) -> Path:

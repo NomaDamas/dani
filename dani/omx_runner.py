@@ -7,18 +7,14 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Protocol, TextIO
+from typing import TextIO
 from uuid import uuid4
 
+from dani.agent_runner import ManagedProcess
 from dani.errors import check_rollout_missing_error, check_transient_capacity_error
 from dani.models import JobRecord, SessionRecord
 
-
-class ManagedProcess(Protocol):
-    def poll(self) -> object: ...
-    def terminate(self) -> None: ...
-    def wait(self, timeout: float | None = None) -> object: ...
-    def kill(self) -> None: ...
+__all__ = ["ManagedProcess", "OmxRunner"]
 
 
 class OmxRunner:
@@ -54,7 +50,7 @@ class OmxRunner:
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
         omx_session_id = None
-        if job.stage == "issue_request":
+        if job.stage in {"issue_request", "issue_followup"}:
             omx_session_id = self._capture_omx_session_id(repo_path=repo_path, prompt=prompt, started_at=started_at)
         return SessionRecord(
             repo_full_name=job.repo_full_name,
@@ -175,6 +171,10 @@ class OmxRunner:
         finally:
             stdout_file.close()
             stderr_file.close()
+
+    def get_session_id(self, runtime_handle: str) -> str | None:
+        del runtime_handle
+        return None
 
     def _capture_omx_session_id(
         self,

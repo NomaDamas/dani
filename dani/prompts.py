@@ -18,14 +18,26 @@ $issue_body
 Existing issue discussion history:
 $discussion
 
+Before writing the comment, do real research — do not produce a plan from memory alone.
+Research requirements:
+- Search the codebase for existing reusable code (modules, functions, utilities, patterns) that already address part of the issue. Cite any findings as path/to/file.py:line.
+- Investigate external sources (official docs, GitHub repos, package registries, web search) for APIs or libraries that already provide the needed capability. Cite any findings as "Title - URL".
+- If nothing is reusable in-repo, state exactly: "no existing reusable code found".
+- If no suitable external dependency exists, state exactly: "no suitable external library found".
+
 Write one GitHub issue comment.
 Checklist:
 - [ ] AI-understood issue summary
 - [ ] Why this issue is needed
 - [ ] Why this issue may not be needed
 - [ ] Expected Outcome
-- [ ] Concise implementation plan
+- [ ] Evidence-based implementation plan
 - [ ] Agent Signature
+
+For the "Evidence-based implementation plan" section, report:
+- Feasibility grounded in the research above (reusable code and/or external libraries, with citations).
+- A concrete step-by-step plan that references the cited evidence (path/to/file.py:line for code, "Title - URL" for external references).
+- Any risks or assumptions surfaced by the research.
 
 Use this exact signature somewhere in the comment:
 $signature
@@ -227,7 +239,18 @@ After the push succeeds, exit.
 }
 
 
-def render_prompt(template_name: str, context: dict[str, Any]) -> str:
+# omx uses codex shell-slash commands ($ralph, $code-review); omo (opencode)
+# has neither, so the equivalent intents are swapped in post-render: ralph loop
+# -> ultrawork mode (always-on for omo), $code-review -> Momus-Plan-Critic subagent.
+_RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "omo": (
+        ("$code-review", "the Momus-Plan-Critic subagent for rigorous verification"),
+        ("$ralph", "ultrawork"),
+    ),
+}
+
+
+def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "omx") -> str:
     template = TEMPLATES[template_name]
     context = dict(context)
     context.setdefault("review_cycle", "")
@@ -238,4 +261,9 @@ def render_prompt(template_name: str, context: dict[str, Any]) -> str:
             **context,
             "signature": build_signature(stage=template_name, job_id=context.get("job_id", "unknown")),
         }
-    return template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
+    rendered = template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
+    substitutions = _RUNTIME_SUBSTITUTIONS.get((runtime or "omx").strip().lower())
+    if substitutions:
+        for needle, replacement in substitutions:
+            rendered = rendered.replace(needle, replacement)
+    return rendered

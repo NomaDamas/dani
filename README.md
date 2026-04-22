@@ -1,13 +1,16 @@
 # dani
 
-Simple GitHub webhook -> OMX automation loop.
+Simple GitHub webhook -> agent automation loop. Supports two pluggable agent
+runtimes: **Oh-My-Codex (`omx`, default)** and **Oh-My-OpenAgents (`omo`,
+opt-in)**.
 
 ## What v1 includes
 - Typer CLI
 - FastAPI webhook server
 - Registered repos only
 - Repo-serial / cross-repo parallel job handling
-- non-interactive `omx exec` / `omx exec resume` launches
+- Pluggable agent runtime: non-interactive `omx exec` / `omx exec resume` (default)
+  or `opencode run --session <id>` (Oh-My-OpenAgents)
 - Separate prompt templates in `dani/prompts.py`
 - Workflows for:
   - issue request report
@@ -17,16 +20,37 @@ Simple GitHub webhook -> OMX automation loop.
   - final verdict + auto-merge on APPROVE
 
 ## Environment
-Required local tools:
+Required local tools (at least one depending on the selected runtime):
 - `git`
-- `omx`
+- `omx` — required when `DANI_AGENT_RUNTIME=omx` (default)
+- `opencode` — required when `DANI_AGENT_RUNTIME=omo`
 
 Required environment variables:
 - `DANI_WEBHOOK_SECRET`
 - `DANI_GITHUB_TOKEN` (preferred) or `GITHUB_TOKEN` / `GH_TOKEN` / `GITHUB_PAT`
 
+Optional environment variables:
+- `DANI_AGENT_RUNTIME` — selects the agent backend. Accepted values:
+  - `omx` / `oh-my-codex` / `codex` (default)
+  - `omo` / `oh-my-openagents` / `oh-my-openagent` / `opencode`
+
+When `DANI_AGENT_RUNTIME=omo` is selected, dani automatically prefixes every
+opencode prompt with the `ultrawork` keyword so oh-my-openagents' ultrawork
+loop mode is always active, and runtime-specific prompt substitutions swap
+codex-only shell commands (`$ralph`, `$code-review`) for their opencode
+equivalents (ultrawork mode and the Momus-Plan-Critic subagent respectively).
+
 ## Codex/OMX trust prerequisite
 Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx exec 'hello'` or `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
+
+## Oh-My-OpenAgents (opencode) prerequisite
+When running with `DANI_AGENT_RUNTIME=omo`, dani launches sessions through
+`opencode run --format json --dangerously-skip-permissions <prompt>` and resumes
+them with `opencode run --session <id> ...`. Install `opencode` (the
+`oh-my-openagent` plugin is loaded automatically when configured in
+`~/.config/opencode/opencode.json`) and make sure the target repository
+directory is trusted at least once via `opencode run 'hello'` before pointing
+dani at it.
 
 ## CLI
 ```bash
@@ -42,7 +66,7 @@ State is stored under `~/.dani/` by default:
 - `jobs.json`
 - `sessions.json`
 - `events.jsonl`
-- `runs/` for generated OMX prompt/script artifacts
+- `runs/` for generated agent-runtime prompt/script artifacts (omx or omo)
 
 
 ## GitHub surfaces

@@ -23,6 +23,51 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
+def test_implementation_prompt_for_omo_replaces_ralph_with_ultrawork() -> None:
+    prompt = render_prompt(
+        "implementation",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "approved",
+            "pr_context": "",
+            "pr_number": "",
+            "dev_branch": "dev",
+            "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+            "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
+        },
+        runtime="omo",
+    )
+
+    assert "$ralph" not in prompt
+    assert "ultrawork" in prompt
+
+
+def test_implementation_prompt_for_omx_explicit_runtime_still_keeps_ralph() -> None:
+    prompt = render_prompt(
+        "implementation",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "approved",
+            "pr_context": "",
+            "pr_number": "",
+            "dev_branch": "dev",
+            "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+            "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
+        },
+        runtime="omx",
+    )
+
+    assert "$ralph" in prompt
+
+
 def test_implementation_prompt_prefers_push_over_pr_edit_for_existing_pr() -> None:
     prompt = render_prompt(
         "implementation",
@@ -104,6 +149,81 @@ def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None
     assert "Expected Outcome" in prompt
 
 
+def test_issue_request_prompt_demands_evidence_based_plan() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "Evidence-based implementation plan" in prompt
+    assert "Concise implementation plan" not in prompt
+
+
+def test_issue_request_prompt_instructs_research_before_planning() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    lowered = prompt.lower()
+    assert "search the codebase" in lowered or "explore the codebase" in lowered
+    assert "external" in lowered
+    assert "official docs" in lowered or "documentation" in lowered
+
+
+def test_issue_request_prompt_allows_explicit_not_found_statement() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    lowered = prompt.lower()
+    assert "no existing reusable code found" in lowered
+    assert "no suitable external library found" in lowered
+
+
+def test_issue_request_prompt_specifies_citation_format() -> None:
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+        },
+    )
+
+    assert "path/to/file.py:line" in prompt
+    assert "URL" in prompt
+
+
 def test_issue_request_prompt_includes_existing_discussion_history() -> None:
     prompt = render_prompt(
         "issue_request",
@@ -140,6 +260,44 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
     assert "actual verification" in prompt.lower()
     assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
+
+
+def test_review_round_prompt_for_omo_delegates_to_momus_plan_critic() -> None:
+    prompt = render_prompt(
+        "review_round",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "round_number": 2,
+            "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
+        },
+        runtime="omo",
+    )
+
+    assert "$code-review" not in prompt
+    assert "Momus-Plan-Critic" in prompt
+    assert "subagent" in prompt.lower()
+
+
+def test_review_round_prompt_for_omo_does_not_mention_ralph_command() -> None:
+    prompt = render_prompt(
+        "review_round",
+        {
+            "repo": "acme/demo",
+            "pr_number": 5,
+            "pr_title": "Feature",
+            "pr_body": "Body",
+            "discussion": "history",
+            "round_number": 2,
+            "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
+        },
+        runtime="omo",
+    )
+
+    assert "$ralph" not in prompt
 
 
 def test_review_round_prompt_for_external_contribution_mentions_contributor_ownership() -> None:

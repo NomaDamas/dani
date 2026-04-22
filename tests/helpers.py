@@ -271,6 +271,10 @@ class FakeOmxRunner:
     def close_session(self, runtime_handle: str) -> None:
         self.closed_sessions.append(runtime_handle)
 
+    def get_session_id(self, runtime_handle: str) -> str | None:
+        del runtime_handle
+        return None
+
 
 class FakeGitDevSyncer:
     def __init__(self, *, conflict: bool = False, fail: bool = False) -> None:

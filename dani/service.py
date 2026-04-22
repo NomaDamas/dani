@@ -4,21 +4,38 @@ import contextlib
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dani.errors import ROLLOUT_MISSING_PATTERNS, RolloutMissingError, TransientCapacityError
+from dani.agent_runner import AgentRunner, build_agent_runner, normalize_runtime
+from dani.errors import (
+    OPENCODE_SESSION_MISSING_PATTERNS,
+    ROLLOUT_MISSING_PATTERNS,
+    ClaudeUsageLimitError,
+    RolloutMissingError,
+    TransientCapacityError,
+)
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
-from dani.models import DaniConfig, JobRecord, NormalizedEvent, RepoConfig, SessionRecord, utc_now
-from dani.omx_runner import OmxRunner
+from dani.models import (
+    RUNTIME_OMO,
+    RUNTIME_OMX,
+    DaniConfig,
+    JobRecord,
+    NormalizedEvent,
+    RepoConfig,
+    SessionRecord,
+    effective_session_runtime,
+    utc_now,
+)
 from dani.prompts import render_prompt
 from dani.queue import RepoQueueManager
+from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
 from dani.storage import JsonStorage
 
 ISSUE_REF_PATTERN = re.compile(r"#(?P<number>\d+)")
-IMPLEMENTING_LABEL = "Implementing"
 
 RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
 
@@ -31,14 +48,21 @@ class DaniService:
         config: DaniConfig,
         storage: JsonStorage | None = None,
         github: Any = None,
-        omx_runner: Any = None,
+        omx_runner: AgentRunner | None = None,
         dev_syncer: Any = None,
+        runtime_runners: dict[str, AgentRunner] | None = None,
+        session_bridge: OmoSessionBridge | None = None,
     ) -> None:
         self.config = config
         self.storage = storage or JsonStorage(config)
         self.github = github or GitHubCLI()
-        self.omx_runner = omx_runner or OmxRunner(config.run_dir)
+        preferred_runtime = normalize_runtime(config.agent_runtime)
+        self.omx_runner: AgentRunner = omx_runner or build_agent_runner(preferred_runtime, config.run_dir)
+        self._runtime_runners: dict[str, AgentRunner] = {preferred_runtime: self.omx_runner}
+        if runtime_runners:
+            self._runtime_runners.update({normalize_runtime(name): runner for name, runner in runtime_runners.items()})
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
+        self.session_bridge = session_bridge or OmoSessionBridge()
         self.queue_manager = RepoQueueManager(self._run_job)
 
     def register_repo(
@@ -412,20 +436,222 @@ class DaniService:
                 return
 
     def _run_job_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
-        prompt = self._build_prompt(repo, job)
-        if job.stage == "issue_followup":
-            session = self.omx_runner.resume(Path(repo.local_path), job, prompt, self._omx_session_id_for(job))
-        else:
-            session = self.omx_runner.launch(Path(repo.local_path), job, prompt)
-        self.storage.create_session(session)
-        self.storage.update_job(job.id, status="launched", session_id=session.id)
+        preferred_runtime = self._preferred_runtime_for(job)
+        lineage_session = self._lineage_session_for(job)
+        initial_runtime = self._initial_runtime_for(job, preferred_runtime, lineage_session)
         try:
-            self.omx_runner.wait(session.runtime_handle)
+            session = self._execute_job_session(
+                repo,
+                job,
+                runtime=initial_runtime,
+                preferred_runtime=preferred_runtime,
+                resume_session=lineage_session if job.stage == "issue_followup" else None,
+            )
+        except ClaudeUsageLimitError as exc:
+            if initial_runtime != RUNTIME_OMO:
+                raise
+            bridge = self._bridge_context_for(repo, job, lineage_session)
+            session = self._execute_job_session(
+                repo,
+                job,
+                runtime=RUNTIME_OMX,
+                preferred_runtime=preferred_runtime,
+                bridge_context=bridge,
+                fallback_reason=f"claude_{exc.limit_type}_limit",
+                usage_limit_error=exc,
+            )
+        self.storage.update_job(
+            job.id,
+            status="launched",
+            session_id=session.id,
+            metadata={**job.metadata, "effective_runtime": session.effective_runtime or initial_runtime},
+        )
+
+    def _execute_job_session(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        *,
+        runtime: str,
+        preferred_runtime: str,
+        resume_session: SessionRecord | None = None,
+        bridge_context: BridgeContext | None = None,
+        fallback_reason: str | None = None,
+        usage_limit_error: ClaudeUsageLimitError | None = None,
+    ) -> SessionRecord:
+        prompt = self._build_prompt(
+            repo,
+            job,
+            runtime=runtime,
+            bridge_prompt=(bridge_context.prompt_block if bridge_context else ""),
+        )
+        runner = self._runner_for_runtime(runtime)
+        if resume_session is not None and effective_session_runtime(resume_session) == runtime:
+            session = runner.resume(Path(repo.local_path), job, prompt, self._session_id_for_resume(job, resume_session))
+        else:
+            session = runner.launch(Path(repo.local_path), job, prompt)
+
+        self._annotate_session_record(
+            session,
+            preferred_runtime=preferred_runtime,
+            effective_runtime=runtime,
+            fallback_reason=fallback_reason,
+            bridge_context=bridge_context,
+        )
+        self.storage.create_session(session)
+        try:
+            runner.wait(session.runtime_handle)
             self._verify_side_effect(repo, job)
         except Exception:
             self._finalize_session(session, status="failed", termination_reason="failed")
             raise
+        if session.omx_session_id is None:
+            post_wait_session_id = runner.get_session_id(session.runtime_handle)
+            if post_wait_session_id:
+                session.omx_session_id = post_wait_session_id
+                self.storage.update_session(
+                    session.id,
+                    omx_session_id=post_wait_session_id,
+                    native_session_runtime=session.native_session_runtime or runtime,
+                    effective_runtime=session.effective_runtime or runtime,
+                )
         self._finalize_session(session, status="completed", termination_reason="completed")
+        self._update_job_runtime_metadata(
+            job,
+            preferred_runtime=preferred_runtime,
+            effective_runtime=runtime,
+            fallback_reason=fallback_reason,
+            bridge_context=bridge_context,
+            usage_limit_error=usage_limit_error,
+            session=session,
+        )
+        return session
+
+    def _annotate_session_record(
+        self,
+        session: SessionRecord,
+        *,
+        preferred_runtime: str,
+        effective_runtime: str,
+        fallback_reason: str | None,
+        bridge_context: BridgeContext | None = None,
+    ) -> None:
+        session.preferred_runtime = preferred_runtime
+        session.effective_runtime = effective_runtime
+        session.native_session_runtime = effective_runtime
+        session.fallback_reason = fallback_reason
+        if bridge_context is not None:
+            session.bridge_source_runtime = bridge_context.source_runtime
+            session.bridge_source_session_id = bridge_context.source_session_id
+
+    def _update_job_runtime_metadata(
+        self,
+        job: JobRecord,
+        *,
+        preferred_runtime: str,
+        effective_runtime: str,
+        fallback_reason: str | None,
+        bridge_context: BridgeContext | None = None,
+        usage_limit_error: ClaudeUsageLimitError | None = None,
+        session: SessionRecord,
+    ) -> None:
+        job.metadata["preferred_runtime"] = preferred_runtime
+        job.metadata["effective_runtime"] = effective_runtime
+        job.metadata["native_session_runtime"] = effective_runtime
+        if fallback_reason:
+            job.metadata["fallback_reason"] = fallback_reason
+        if bridge_context is not None:
+            if bridge_context.source_runtime:
+                job.metadata["bridge_source_runtime"] = bridge_context.source_runtime
+            if bridge_context.source_session_id:
+                job.metadata["bridge_source_session_id"] = bridge_context.source_session_id
+            if bridge_context.note:
+                job.metadata["bridge_note"] = bridge_context.note
+        if usage_limit_error is not None:
+            job.metadata["usage_limit_runtime"] = RUNTIME_OMO
+            job.metadata["usage_limit_kind"] = usage_limit_error.limit_type
+            if usage_limit_error.reset_hint:
+                job.metadata["usage_limit_reset_hint"] = usage_limit_error.reset_hint
+            if usage_limit_error.suggested_retry_at:
+                job.metadata["usage_limit_until"] = usage_limit_error.suggested_retry_at
+        if session.omx_session_id:
+            job.metadata["omx_session_id"] = session.omx_session_id
+
+    def _runner_for_runtime(self, runtime: str) -> AgentRunner:
+        normalized = normalize_runtime(runtime)
+        runner = self._runtime_runners.get(normalized)
+        if runner is None:
+            runner = build_agent_runner(normalized, self.config.run_dir)
+            self._runtime_runners[normalized] = runner
+        return runner
+
+    def _preferred_runtime_for(self, job: JobRecord) -> str:
+        runtime = job.metadata.get("preferred_runtime")
+        if isinstance(runtime, str) and runtime:
+            return normalize_runtime(runtime)
+        return normalize_runtime(self.config.agent_runtime)
+
+    def _lineage_session_for(self, job: JobRecord) -> SessionRecord | None:
+        if job.stage != "issue_followup":
+            return None
+        if job.issue_number is None:
+            return None
+        return self._latest_issue_lineage_session(job.repo_full_name, job.issue_number)
+
+    def _initial_runtime_for(
+        self,
+        job: JobRecord,
+        preferred_runtime: str,
+        lineage_session: SessionRecord | None,
+    ) -> str:
+        if job.stage == "issue_followup" and lineage_session is not None:
+            lineage_runtime = effective_session_runtime(lineage_session)
+            if lineage_runtime:
+                return lineage_runtime
+        if preferred_runtime != RUNTIME_OMO:
+            return preferred_runtime
+        if self._has_active_omo_usage_limit(job.repo_full_name):
+            job.metadata["fallback_reason"] = "cached_claude_usage_limit"
+            return RUNTIME_OMX
+        return preferred_runtime
+
+    def _has_active_omo_usage_limit(self, repo_full_name: str) -> bool:
+        now = datetime.now(tz=timezone.utc)
+        for job in reversed(self.storage.list_jobs()):
+            if job.repo_full_name != repo_full_name:
+                continue
+            if job.metadata.get("usage_limit_runtime") != RUNTIME_OMO:
+                continue
+            retry_at = job.metadata.get("usage_limit_until")
+            if not isinstance(retry_at, str) or not retry_at:
+                continue
+            try:
+                retry_at_dt = datetime.fromisoformat(retry_at)
+            except ValueError:
+                continue
+            if retry_at_dt.tzinfo is None:
+                retry_at_dt = retry_at_dt.replace(tzinfo=timezone.utc)
+            if retry_at_dt > now:
+                return True
+        return False
+
+    def _session_id_for_resume(self, job: JobRecord, session: SessionRecord) -> str:
+        if session.omx_session_id:
+            return session.omx_session_id
+        return self._omx_session_id_for(job)
+
+    def _bridge_context_for(
+        self, repo: RepoConfig, job: JobRecord, lineage_session: SessionRecord | None
+    ) -> BridgeContext | None:
+        source_session_id = None
+        if lineage_session is not None and effective_session_runtime(lineage_session) == RUNTIME_OMO:
+            source_session_id = lineage_session.omx_session_id
+        bridge = self.session_bridge.load(repo_path=Path(repo.local_path), session_id=source_session_id)
+        if bridge is None:
+            return None
+        if not bridge.prompt_block and not bridge.note:
+            return None
+        return bridge
 
     def _handle_transient_failure(
         self,
@@ -500,6 +726,14 @@ class DaniService:
             "retry_attempts": attempt - 1,
             "retry_history": retry_history,
         }
+        if isinstance(exc, ClaudeUsageLimitError):
+            metadata["error"] = "claude_usage_limit"
+            metadata["usage_limit_runtime"] = RUNTIME_OMO
+            metadata["usage_limit_kind"] = exc.limit_type
+            if exc.reset_hint:
+                metadata["usage_limit_reset_hint"] = exc.reset_hint
+            if exc.suggested_retry_at:
+                metadata["usage_limit_until"] = exc.suggested_retry_at
         if self._is_rollout_missing_error(exc):
             metadata["error"] = "rollout_missing"
             metadata["error_detail"] = str(exc)
@@ -517,6 +751,12 @@ class DaniService:
             )
         except DevSyncConflictError as exc:
             conflict_context = exc.context
+            preferred_runtime = self._preferred_runtime_for(job)
+            runtime = preferred_runtime
+            fallback_reason = None
+            if preferred_runtime == RUNTIME_OMO and self._has_active_omo_usage_limit(job.repo_full_name):
+                runtime = RUNTIME_OMX
+                fallback_reason = "cached_claude_usage_limit"
             prompt = render_prompt(
                 "dev_sync_conflict",
                 {
@@ -528,26 +768,109 @@ class DaniService:
                     "temp_branch": conflict_context.temp_branch,
                     "commit_message": self.dev_syncer.build_commit_message(repo, job),
                 },
+                runtime=runtime,
             )
-            session = self.omx_runner.launch(conflict_context.worktree_path, job, prompt)
-            self.storage.create_session(session)
-            self.storage.update_job(
-                job.id,
-                status="launched",
-                session_id=session.id,
-                metadata={
+            runner = self._runner_for_runtime(runtime)
+            try:
+                session = runner.launch(conflict_context.worktree_path, job, prompt)
+                self._annotate_session_record(
+                    session,
+                    preferred_runtime=preferred_runtime,
+                    effective_runtime=runtime,
+                    fallback_reason=fallback_reason,
+                )
+                self.storage.create_session(session)
+                self.storage.update_job(
+                    job.id,
+                    status="launched",
+                    session_id=session.id,
+                    metadata={
+                        **job.metadata,
+                        "preferred_runtime": preferred_runtime,
+                        "effective_runtime": runtime,
+                        "native_session_runtime": runtime,
+                        "fallback_reason": fallback_reason,
+                        "sync_status": "conflict",
+                        "worktree_path": str(conflict_context.worktree_path),
+                    },
+                )
+                job.metadata = {
                     **job.metadata,
+                    "preferred_runtime": preferred_runtime,
+                    "effective_runtime": runtime,
+                    "native_session_runtime": runtime,
+                    "fallback_reason": fallback_reason,
                     "sync_status": "conflict",
                     "worktree_path": str(conflict_context.worktree_path),
-                },
-            )
-            self.omx_runner.wait(session.runtime_handle)
+                }
+                runner.wait(session.runtime_handle)
+            except ClaudeUsageLimitError as limit_exc:
+                if runtime != RUNTIME_OMO:
+                    raise
+                if session is not None:
+                    self._finalize_session(session, status="failed", termination_reason="failed")
+                runtime = RUNTIME_OMX
+                fallback_reason = f"claude_{limit_exc.limit_type}_limit"
+                prompt = render_prompt(
+                    "dev_sync_conflict",
+                    {
+                        "repo": repo.full_name,
+                        "local_path": str(conflict_context.worktree_path),
+                        "main_branch": repo.main_branch,
+                        "dev_branch": repo.dev_branch,
+                        "main_sha": conflict_context.source_sha,
+                        "temp_branch": conflict_context.temp_branch,
+                        "commit_message": self.dev_syncer.build_commit_message(repo, job),
+                    },
+                    runtime=runtime,
+                )
+                runner = self._runner_for_runtime(runtime)
+                session = runner.launch(conflict_context.worktree_path, job, prompt)
+                self._annotate_session_record(
+                    session,
+                    preferred_runtime=preferred_runtime,
+                    effective_runtime=runtime,
+                    fallback_reason=fallback_reason,
+                )
+                self.storage.create_session(session)
+                self.storage.update_job(
+                    job.id,
+                    status="launched",
+                    session_id=session.id,
+                    metadata={
+                        **job.metadata,
+                        "preferred_runtime": preferred_runtime,
+                        "effective_runtime": runtime,
+                        "native_session_runtime": runtime,
+                        "fallback_reason": fallback_reason,
+                        "usage_limit_runtime": RUNTIME_OMO,
+                        "usage_limit_kind": limit_exc.limit_type,
+                        "usage_limit_until": limit_exc.suggested_retry_at,
+                        "usage_limit_reset_hint": limit_exc.reset_hint,
+                        "sync_status": "conflict",
+                        "worktree_path": str(conflict_context.worktree_path),
+                    },
+                )
+                job.metadata = {
+                    **job.metadata,
+                    "preferred_runtime": preferred_runtime,
+                    "effective_runtime": runtime,
+                    "native_session_runtime": runtime,
+                    "fallback_reason": fallback_reason,
+                    "usage_limit_runtime": RUNTIME_OMO,
+                    "usage_limit_kind": limit_exc.limit_type,
+                    "usage_limit_until": limit_exc.suggested_retry_at,
+                    "usage_limit_reset_hint": limit_exc.reset_hint,
+                    "sync_status": "conflict",
+                    "worktree_path": str(conflict_context.worktree_path),
+                }
+                runner.wait(session.runtime_handle)
             self.dev_syncer.verify_remote_sync(conflict_context)
             self._finalize_session(session, status="completed", termination_reason="completed")
             self.storage.update_job(
                 job.id,
                 status="completed",
-                metadata={**job.metadata, "sync_status": "resolved_with_omx"},
+                metadata={**job.metadata, "effective_runtime": runtime, "sync_status": "resolved_with_agent"},
             )
         except Exception as exc:
             if session is not None:
@@ -561,8 +884,12 @@ class DaniService:
                 self.dev_syncer.cleanup(conflict_context)
 
     def _finalize_session(self, session: SessionRecord, *, status: str, termination_reason: str) -> None:
+        runtime = effective_session_runtime(session) or session.native_session_runtime or normalize_runtime(
+            self.config.agent_runtime
+        )
+        runner = self._runner_for_runtime(runtime)
         try:
-            self.omx_runner.close_session(session.runtime_handle)
+            runner.close_session(session.runtime_handle)
         finally:
             self.storage.update_session(
                 session.id,
@@ -571,7 +898,15 @@ class DaniService:
                 termination_reason=termination_reason,
             )
 
-    def _build_prompt(self, repo: RepoConfig, job: JobRecord) -> str:
+    def _build_prompt(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        *,
+        runtime: str | None = None,
+        bridge_prompt: str = "",
+    ) -> str:
+        resolved_runtime = normalize_runtime(runtime or self.config.agent_runtime)
         issue_number = job.issue_number or 0
         pr_number = job.pr_number or 0
         issue_context = self._issue_metadata(repo.full_name, issue_number) if issue_number else {}
@@ -581,26 +916,82 @@ class DaniService:
         pr_title = pr_snapshot.get("title", job.metadata.get("title", f"PR #{pr_number}"))
         pr_body = pr_snapshot.get("body", job.metadata.get("body", ""))
         if job.stage == "issue_request":
-            return self._build_issue_request_prompt(repo, job, issue_number, issue_title, issue_body)
+            prompt = self._build_issue_request_prompt(repo, job, issue_number, issue_title, issue_body, resolved_runtime)
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "implementation":
-            return self._build_implementation_prompt(
-                repo, job, issue_number, issue_title, issue_body, pr_number, pr_title, pr_body
+            prompt = self._build_implementation_prompt(
+                repo,
+                job,
+                issue_number,
+                issue_title,
+                issue_body,
+                pr_number,
+                pr_title,
+                pr_body,
+                resolved_runtime,
             )
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "issue_followup":
-            return self._build_issue_followup_prompt(repo, job, issue_number, issue_title, issue_body)
+            prompt = self._build_issue_followup_prompt(
+                repo,
+                job,
+                issue_number,
+                issue_title,
+                issue_body,
+                resolved_runtime,
+            )
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "review_round":
-            return self._build_review_round_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+            prompt = self._build_review_round_prompt(
+                repo,
+                job,
+                issue_number,
+                pr_number,
+                pr_title,
+                pr_body,
+                resolved_runtime,
+            )
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "human_escalation":
-            return self._build_human_escalation_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+            prompt = self._build_human_escalation_prompt(
+                repo,
+                job,
+                issue_number,
+                pr_number,
+                pr_title,
+                pr_body,
+                resolved_runtime,
+            )
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
         if job.stage == "merge_conflict_resolution":
-            return self._build_merge_conflict_resolution_prompt(repo, job, issue_number, pr_number, pr_title, pr_body)
+            prompt = self._build_merge_conflict_resolution_prompt(
+                repo,
+                job,
+                issue_number,
+                pr_number,
+                pr_title,
+                pr_body,
+                resolved_runtime,
+            )
+            return self._apply_bridge_context(prompt, bridge_prompt)
 
-        return self._build_final_verdict_prompt(job, issue_number, pr_number, pr_title, pr_body)
+        prompt = self._build_final_verdict_prompt(job, issue_number, pr_number, pr_title, pr_body, resolved_runtime)
+        return self._apply_bridge_context(prompt, bridge_prompt)
+
+    def _apply_bridge_context(self, prompt: str, bridge_prompt: str) -> str:
+        if not bridge_prompt.strip():
+            return prompt
+        return (
+            f"{bridge_prompt}\n\n"
+            "Use the imported OMO context above only as bounded background context. "
+            "This is not a native resume; continue from it conservatively.\n\n"
+            f"{prompt}"
+        )
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         if job.stage == "issue_request":
@@ -631,6 +1022,7 @@ class DaniService:
         issue_number: int,
         issue_title: str,
         issue_body: str,
+        runtime: str,
     ) -> str:
         return render_prompt(
             "issue_request",
@@ -643,6 +1035,7 @@ class DaniService:
                 "discussion": self._render_issue_discussion(repo.full_name, issue_number),
                 "signature": build_signature(stage="issue_request", job=job.id, issue=issue_number),
             },
+            runtime=runtime,
         )
 
     def _build_implementation_prompt(
@@ -655,6 +1048,7 @@ class DaniService:
         pr_number: int,
         pr_title: str,
         pr_body: str,
+        runtime: str,
     ) -> str:
         pr_discussion = self._render_pr_discussion(repo.full_name, pr_number) if pr_number else ""
         pr_context = ""
@@ -705,6 +1099,7 @@ class DaniService:
                 "signature": signature,
                 "signature_instructions": signature_instructions,
             },
+            runtime=runtime,
         )
 
     def _build_issue_followup_prompt(
@@ -714,6 +1109,7 @@ class DaniService:
         issue_number: int,
         issue_title: str,
         issue_body: str,
+        runtime: str,
     ) -> str:
         return render_prompt(
             "issue_followup",
@@ -726,6 +1122,7 @@ class DaniService:
                 "comment_body": job.metadata.get("comment_body", ""),
                 "signature": build_signature(stage="issue_followup", job=job.id, issue=issue_number),
             },
+            runtime=runtime,
         )
 
     def _build_review_round_prompt(
@@ -736,6 +1133,7 @@ class DaniService:
         pr_number: int,
         pr_title: str,
         pr_body: str,
+        runtime: str,
     ) -> str:
         signature_fields: dict[str, int | str] = {
             "stage": "review_round",
@@ -770,6 +1168,7 @@ class DaniService:
                 ),
                 "signature": build_signature(**signature_fields),
             },
+            runtime=runtime,
         )
 
     def _build_merge_conflict_resolution_prompt(
@@ -780,6 +1179,7 @@ class DaniService:
         pr_number: int,
         pr_title: str,
         pr_body: str,
+        runtime: str,
     ) -> str:
         return render_prompt(
             "merge_conflict_resolution",
@@ -795,6 +1195,7 @@ class DaniService:
                 "conflict_reason": job.metadata.get("conflict_reason", "Merge conflict detected while merging."),
                 "signature": build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
             },
+            runtime=runtime,
         )
 
     def _build_final_verdict_prompt(
@@ -804,6 +1205,7 @@ class DaniService:
         pr_number: int,
         pr_title: str,
         pr_body: str,
+        runtime: str,
     ) -> str:
         discussion_parts = []
         if issue_number:
@@ -829,6 +1231,7 @@ class DaniService:
                 ),
                 "reject_signature": build_signature(stage="final_verdict", job=job.id, pr=pr_number, verdict="REJECT"),
             },
+            runtime=runtime,
         )
 
     def _build_human_escalation_prompt(
@@ -839,6 +1242,7 @@ class DaniService:
         pr_number: int,
         pr_title: str,
         pr_body: str,
+        runtime: str,
     ) -> str:
         discussion_parts = []
         if issue_number:
@@ -857,6 +1261,7 @@ class DaniService:
                 "review_limit": self.config.external_review_limit,
                 "signature": build_signature(stage="human_escalation", job=job.id, pr=pr_number),
             },
+            runtime=runtime,
         )
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
@@ -991,7 +1396,6 @@ class DaniService:
         return False
 
     def _queue_implementation(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
-        self.github.ensure_issue_label(repo.full_name, event.number, IMPLEMENTING_LABEL)
         job = self._enqueue_job(
             repo,
             stage="implementation",
@@ -1001,11 +1405,7 @@ class DaniService:
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
     def _queue_issue_followup(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
-        session = self._latest_resumable_session(
-            repo_full_name=event.repo_full_name,
-            stage="issue_request",
-            issue_number=event.number,
-        )
+        session = self._latest_issue_lineage_session(event.repo_full_name, event.number)
         if session is None or session.omx_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
         job = self._enqueue_job(
@@ -1017,9 +1417,28 @@ class DaniService:
                 "body": event.payload.get("issue", {}).get("body", ""),
                 "comment_body": event.body or "",
                 "omx_session_id": session.omx_session_id,
+                "preferred_runtime": session.preferred_runtime or normalize_runtime(self.config.agent_runtime),
+                "effective_runtime": effective_session_runtime(session),
+                "native_session_runtime": session.native_session_runtime,
+                "fallback_reason": session.fallback_reason,
+                "bridge_source_runtime": session.bridge_source_runtime,
+                "bridge_source_session_id": session.bridge_source_session_id,
             },
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
+
+    def _latest_issue_lineage_session(self, repo_full_name: str, issue_number: int) -> SessionRecord | None:
+        for session in reversed(self.storage.list_sessions()):
+            if session.repo_full_name != repo_full_name:
+                continue
+            if session.issue_number != issue_number:
+                continue
+            if session.stage not in {"issue_request", "issue_followup"}:
+                continue
+            if not session.omx_session_id:
+                continue
+            return session
+        return None
 
     def _omx_session_id_for(self, job: JobRecord) -> str:
         omx_session_id = job.metadata.get("omx_session_id")
@@ -1115,22 +1534,6 @@ class DaniService:
             issue_number=issue_number,
             pr_number=pr_number,
             metadata=metadata,
-        )
-
-    def _latest_resumable_session(
-        self,
-        *,
-        repo_full_name: str,
-        stage: str,
-        issue_number: int | None = None,
-        pr_number: int | None = None,
-    ) -> SessionRecord | None:
-        return self.storage.find_latest_session(
-            repo_full_name=repo_full_name,
-            stage=stage,
-            issue_number=issue_number,
-            pr_number=pr_number,
-            require_omx_session_id=True,
         )
 
     def _agent_event_key(self, signature: dict[str, str], *, default_pr: int | None = None) -> str:
@@ -1269,7 +1672,9 @@ class DaniService:
         if isinstance(exc, RolloutMissingError):
             return True
         error_text = str(exc)
-        return any(pattern.search(error_text) for pattern in ROLLOUT_MISSING_PATTERNS)
+        return any(
+            pattern.search(error_text) for pattern in (*ROLLOUT_MISSING_PATTERNS, *OPENCODE_SESSION_MISSING_PATTERNS)
+        )
 
     def _post_session_lost_warning(self, job: JobRecord) -> None:
         if job.stage != "issue_followup" or job.issue_number is None:
