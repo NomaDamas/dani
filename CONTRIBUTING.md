@@ -129,14 +129,16 @@ Before you submit a pull request, check that it meets these guidelines:
 
 For PRs opened by external contributors, `dani` follows a lighter event-driven review loop:
 
-1. A maintainer review runs when the PR is opened.
-2. If changes are requested, the contributor owns the follow-up implementation.
-3. `dani` reviews again only when the PR changes meaningfully, such as:
+1. External contributor PRs are eligible only when the PR author GitHub account is at least one year old. PRs
+   from newer accounts are closed automatically with guidance to open an issue instead.
+2. A maintainer review runs when the PR is opened.
+3. If changes are requested, the contributor owns the follow-up implementation.
+4. `dani` reviews again only when the PR changes meaningfully, such as:
    - a new commit (`synchronize`)
    - a renewed review request
    - another PR-open style re-entry event (`reopened`, `ready_for_review`)
    - duplicate webhook deliveries are ignored, using the GitHub delivery id when available and a PR activity fallback key otherwise
    - once all remaining automated review passes are already queued or running, extra PR-activity events are coalesced until one of those passes finishes
-4. The merge bar stays the same as the existing verdict session: requirements must be met, real verification must pass, and the PR must be approveable.
-5. Only completed automated review passes count toward escalation, but queued/running passes still reserve the remaining review budget.
-6. If automated review reaches 10 completed passes without approval, `dani` immediately escalates the PR to a human maintainer for a manual decision.
+5. The merge bar stays the same as the existing verdict session: requirements must be met, real verification must pass, and the PR must be approveable.
+6. Only completed automated review passes count toward escalation, but queued/running passes still reserve the remaining review budget.
+7. If automated review reaches 10 completed passes without approval, `dani` immediately escalates the PR to a human maintainer for a manual decision.

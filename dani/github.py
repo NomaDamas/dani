@@ -78,6 +78,9 @@ class GitHubCLI:
     def get_pull_request(self, repo_full_name: str, pr_number: int) -> dict[str, Any]:
         return self._repo(repo_full_name).get_pull(pr_number).raw_data
 
+    def get_user(self, login: str) -> dict[str, Any]:
+        return self._client_for_request().get_user(login).raw_data
+
     def find_pr_by_signature(self, repo_full_name: str, signature_fragment: str) -> dict[str, Any] | None:
         for pull_request in self.list_pull_requests(repo_full_name):
             if signature_fragment in (pull_request.get("body") or ""):
@@ -117,6 +120,10 @@ class GitHubCLI:
     def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         return pull_request.create_issue_comment(body).raw_data
+
+    def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        pull_request = self._repo(repo_full_name).get_pull(pr_number)
+        pull_request.edit(state="closed")
 
     def ensure_issue_label(self, repo_full_name: str, issue_number: int, label: str) -> None:
         repo = self._repo(repo_full_name)

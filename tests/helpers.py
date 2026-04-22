@@ -22,6 +22,8 @@ class FakeGitHubCLI:
         self.merged: list[tuple[str, int]] = []
         self.merge_conflicts: set[tuple[str, int]] = set()
         self.issue_labels: dict[tuple[str, int], list[str]] = {}
+        self.users: dict[str, dict[str, Any]] = {}
+        self.closed_pull_requests: list[tuple[str, int]] = []
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -53,6 +55,9 @@ class FakeGitHubCLI:
             "head": {"ref": f"Feature/#{pr_number}"},
             "base": {"ref": "dev"},
         }
+
+    def get_user(self, login: str) -> dict[str, Any]:
+        return dict(self.users.get(login, {"login": login}))
 
     def latest_signature_comment(
         self, repo_full_name: str, number: int, *, kind: str
@@ -126,6 +131,7 @@ class FakeGitHubCLI:
         })
 
     def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
+        self.closed_pull_requests.append((repo_full_name, pr_number))
         for pr in self.prs.get(repo_full_name, []):
             if pr.get("number") == pr_number:
                 pr["state"] = "closed"
