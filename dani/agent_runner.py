@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Protocol, TextIO, cast, runtime_checkable
 
@@ -25,8 +24,6 @@ class ManagedProcess(Protocol):
 
 
 ProcessEntry = tuple[ManagedProcess, TextIO, TextIO]
-
-DANI_OMO_LEGACY_SUBPROCESS_ENV = "DANI_OMO_LEGACY_SUBPROCESS"
 
 
 @runtime_checkable
@@ -66,11 +63,6 @@ class AgentRunner(Protocol):
     def can_resume(self, session_id: str) -> bool: ...
 
 
-def _legacy_subprocess_enabled() -> bool:
-    raw = os.environ.get(DANI_OMO_LEGACY_SUBPROCESS_ENV, "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
 def normalize_runtime(runtime: str | None) -> str:
     normalized = (runtime or "omx").strip().lower()
     if normalized in RUNTIME_ALIASES:
@@ -80,22 +72,14 @@ def normalize_runtime(runtime: str | None) -> str:
 
 
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
-    """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``).
-
-    The opencode (``omo``) runtime defaults to the long-lived HTTP-server
-    backend. Set ``DANI_OMO_LEGACY_SUBPROCESS=1`` to fall back to the legacy
-    one-shot ``opencode run`` subprocess implementation.
-    """
+    """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``)."""
     from dani.omo_http_runner import OmoHttpRunner
-    from dani.omo_runner import OmoRunner
     from dani.omx_runner import OmxRunner
 
     normalized = normalize_runtime(runtime)
     if normalized == "omx":
         return cast(AgentRunner, OmxRunner(run_dir))
     if normalized == "omo":
-        if _legacy_subprocess_enabled():
-            return cast(AgentRunner, OmoRunner(run_dir))
         return cast(AgentRunner, OmoHttpRunner(run_dir))
     msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
     raise ValueError(msg)

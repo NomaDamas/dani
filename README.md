@@ -10,7 +10,7 @@ opt-in)**.
 - Registered repos only
 - Repo-serial / cross-repo parallel job handling
 - Pluggable agent runtime: non-interactive `omx exec` / `omx exec resume` (default)
-  or `opencode run --session <id>` (Oh-My-OpenAgents)
+  or HTTP-backed Oh-My-OpenAgents (`opencode serve`)
 - Separate prompt templates in `dani/prompts.py`
 - Workflows for:
   - issue request report
@@ -57,9 +57,6 @@ Optional `omo` runtime environment variables:
 - `DANI_OPENCODE_PERMISSION_RESPONSE` — `once` (default), `always`, or
   `reject`. Controls how dani responds to opencode `permission.updated`
   events automatically.
-- `DANI_OMO_LEGACY_SUBPROCESS` — set to `1` to fall back to the legacy
-  `opencode run` subprocess implementation. Intended as a temporary
-  rollback hatch; the HTTP runtime is the supported path.
 - `OPENCODE_SERVER_PASSWORD` — forwarded to the spawned server and used
   for HTTP basic auth on every request when set.
 
@@ -76,11 +73,6 @@ submission, completion via SSE, and resume. Install `opencode` (the
 `~/.config/opencode/opencode.json`) and make sure the target repository
 directory is trusted at least once via `opencode run 'hello'` before pointing
 dani at it.
-
-If you set `DANI_OMO_LEGACY_SUBPROCESS=1`, dani falls back to the previous
-behavior — launching one-shot `opencode run --format json
---dangerously-skip-permissions <prompt>` subprocesses and resuming them with
-`opencode run --session <id> ...`. Use this only as a temporary escape hatch.
 
 ## CLI
 ```bash

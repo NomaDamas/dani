@@ -28,10 +28,10 @@ ROLLOUT_MISSING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"no rollout found", re.IGNORECASE),
 ]
 
-# Patterns emitted by `opencode run --session ...` when the requested session
-# has been deleted/expired. Derived from the CLI source:
+# Patterns emitted when an opencode session resume request targets a deleted or
+# expired session. Derived from the CLI source:
 #   "Session not found: ..." and related error text surfaced via the
-#   opencode run JSON event stream / stderr.
+#   opencode event stream / stderr.
 OPENCODE_SESSION_MISSING_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"[Ss]ession not found", re.IGNORECASE),
     re.compile(r"[Ss]ession does not exist", re.IGNORECASE),
@@ -71,7 +71,7 @@ class RolloutMissingError(Exception):
 
     This error is runtime-agnostic: the OMX (codex) runner raises it when the
     codex rollout file is gone; the OMO (opencode) runner raises it when
-    ``opencode run --session <id>`` reports the session no longer exists.
+    opencode reports the prior session no longer exists.
     """
 
     def __init__(self, message: str, pattern: str) -> None:

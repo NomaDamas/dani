@@ -667,8 +667,6 @@ def test_dani_service_runs_issue_request_through_omo_http_runner_end_to_end(
         def shutdown_all(self) -> None:
             return None
 
-    monkeypatch.delenv("DANI_OMO_LEGACY_SUBPROCESS", raising=False)
-
     config = DaniConfig(
         data_dir=tmp_path / ".dani",
         webhook_secret="unit-test-secret",
