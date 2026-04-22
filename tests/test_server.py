@@ -6,10 +6,10 @@ from typing import cast
 
 from fastapi.testclient import TestClient
 
+from dani.agent_runner import AgentRunner
 from dani.git_sync import DevSyncOutcome
 from dani.github import GitHubCLI
 from dani.models import DaniConfig
-from dani.omx_runner import OmxRunner
 from dani.server import create_app
 from dani.service import DaniService
 from dani.storage import JsonStorage
@@ -28,7 +28,7 @@ def test_github_webhook_endpoint_accepts_valid_signature(tmp_path: Path) -> None
     github = FakeGitHubCLI()
     omx_runner = FakeOmxRunner(github)
     service = DaniService(
-        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(OmxRunner, omx_runner)
+        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(AgentRunner, omx_runner)
     )
     service.register_repo("acme/demo", str(tmp_path))
     client = TestClient(create_app(service))
@@ -65,7 +65,7 @@ def test_github_webhook_endpoint_queues_dev_sync_on_main_push(tmp_path: Path) ->
         config,
         storage=JsonStorage(config),
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omx_runner),
+        omx_runner=cast(AgentRunner, omx_runner),
         dev_syncer=FakeSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -99,7 +99,7 @@ def test_github_webhook_endpoint_dedupes_duplicate_external_pr_delivery(tmp_path
     github = FakeGitHubCLI()
     omx_runner = FakeOmxRunner(github)
     service = DaniService(
-        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(OmxRunner, omx_runner)
+        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(AgentRunner, omx_runner)
     )
     service.register_repo("acme/demo", str(tmp_path))
     client = TestClient(create_app(service))

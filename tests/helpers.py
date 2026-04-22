@@ -275,6 +275,9 @@ class FakeOmxRunner:
         del runtime_handle
         return None
 
+    def can_resume(self, session_id: str) -> bool:
+        return bool(session_id)
+
 
 class FakeGitDevSyncer:
     def __init__(self, *, conflict: bool = False, fail: bool = False) -> None:

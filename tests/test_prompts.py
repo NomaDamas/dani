@@ -242,6 +242,85 @@ def test_issue_request_prompt_includes_existing_discussion_history() -> None:
     assert "Earlier context" in prompt
 
 
+def _issue_request_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "local_path": "workspace/demo",
+        "issue_number": 7,
+        "issue_title": "Need a bot",
+        "issue_body": "Implement it",
+        "discussion": "",
+        "signature": "<!-- dani:stage=issue_request;job=abc;issue=7 -->",
+    }
+
+
+def _issue_followup_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "local_path": "workspace/demo",
+        "issue_number": 7,
+        "issue_title": "Need a bot",
+        "issue_body": "Implement it",
+        "comment_body": "User clarification",
+        "signature": "<!-- dani:stage=issue_followup;job=abc;issue=7 -->",
+    }
+
+
+def test_issue_request_prompt_declares_planning_only_role() -> None:
+    prompt = render_prompt("issue_request", _issue_request_context())
+
+    assert "PLANNING AGENT" in prompt
+    assert "DO NOT write code" in prompt
+    assert "your session ENDS" in prompt
+    assert "/approve" in prompt
+    assert "NEW, SEPARATE agent session" in prompt
+
+
+def test_issue_request_prompt_forbids_self_handoff_promises() -> None:
+    prompt = render_prompt("issue_request", _issue_request_context())
+
+    assert 'Do NOT promise to "create a PR"' in prompt
+    assert "the implementation agent will" in prompt
+    assert "does not inherit your reasoning trace" in prompt
+
+
+def test_issue_request_prompt_checklist_mentions_approve_gate_and_open_questions() -> None:
+    prompt = render_prompt("issue_request", _issue_request_context())
+
+    assert "Open questions for the human" in prompt
+    assert 'implementation starts only after a human comment containing "/approve"' in prompt
+
+
+def test_issue_followup_prompt_declares_planning_only_role() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context())
+
+    assert "PLANNING AGENT" in prompt
+    assert "DO NOT write code" in prompt
+    assert "/approve" in prompt
+    assert "NEW, SEPARATE agent session" in prompt
+
+
+def test_issue_followup_prompt_forbids_self_handoff_promises() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context())
+
+    assert 'Do NOT promise to "create a PR"' in prompt
+    assert "the implementation agent will" in prompt
+
+
+def test_issue_followup_prompt_keeps_signature_on_own_line() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context())
+
+    signature_lines = [line for line in prompt.splitlines() if line.startswith("<!-- dani:")]
+    assert signature_lines, "issue_followup must emit the signature on its own line for downstream parsers"
+
+
+def test_issue_followup_prompt_for_omo_does_not_replace_ralph_substring() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context(), runtime="omo")
+
+    assert "$ralph" not in prompt
+    assert "$code-review" not in prompt
+
+
 def test_review_round_prompt_requires_code_review_and_verification() -> None:
     prompt = render_prompt(
         "review_round",
