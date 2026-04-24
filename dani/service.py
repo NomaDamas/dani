@@ -513,7 +513,7 @@ class DaniService:
         )
         self.storage.create_session(session)
         try:
-            runner.wait(session.runtime_handle)
+            runner.wait(session.runtime_handle, timeout_seconds=self.config.agent_timeout_seconds)
             self._verify_side_effect(repo, job)
         except Exception:
             self._finalize_session(session, status="failed", termination_reason="failed")
@@ -825,7 +825,7 @@ class DaniService:
                     "sync_status": "conflict",
                     "worktree_path": str(conflict_context.worktree_path),
                 }
-                runner.wait(session.runtime_handle)
+                runner.wait(session.runtime_handle, timeout_seconds=self.config.agent_timeout_seconds)
             except ClaudeUsageLimitError as limit_exc:
                 if runtime != RUNTIME_OMO:
                     raise
@@ -886,7 +886,7 @@ class DaniService:
                     "sync_status": "conflict",
                     "worktree_path": str(conflict_context.worktree_path),
                 }
-                runner.wait(session.runtime_handle)
+                runner.wait(session.runtime_handle, timeout_seconds=self.config.agent_timeout_seconds)
             self.dev_syncer.verify_remote_sync(conflict_context)
             self._finalize_session(session, status="completed", termination_reason="completed")
             self.storage.update_job(

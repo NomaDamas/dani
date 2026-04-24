@@ -2252,3 +2252,34 @@ def test_implementation_without_issue_drops_untracked_pr(tmp_path: Path) -> None
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=42) == []
     assert omx_runner.launches == []
+
+
+def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_timeout_seconds=5400)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omx_runner = FakeOmxRunner(github)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, omx_runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=5,
+            actor_login="alice",
+            payload={},
+            title="Configurable timeout",
+            body="Please handle this.",
+        )
+    )
+    service.wait_for_idle()
+
+    assert omx_runner.wait_calls[-1]["timeout_seconds"] == 5400
