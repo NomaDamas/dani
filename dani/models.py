@@ -8,6 +8,7 @@ from uuid import uuid4
 
 RUNTIME_OMX = "omx"
 RUNTIME_OMO = "omo"
+DEFAULT_AGENT_TIMEOUT_SECONDS = 3600.0
 
 
 def utc_now() -> str:
@@ -120,6 +121,11 @@ class DaniConfig:
     review_rounds: int = 3
     external_review_limit: int = 10
     agent_runtime: str = "omx"
+    agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
+
+    @property
+    def config_path(self) -> Path:
+        return self.data_dir / "config.json"
 
     @property
     def registry_path(self) -> Path:

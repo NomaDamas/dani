@@ -157,6 +157,7 @@ class FakeOmxRunner:
         self.launches: list[LaunchRecord] = []
         self.resumes: list[ResumeRecord] = []
         self.closed_sessions: list[str] = []
+        self.wait_calls: list[dict[str, object]] = []
         self._transient_failures_remaining: int = 0
         self.resume_error: Exception | None = None
 
@@ -269,6 +270,11 @@ class FakeOmxRunner:
         )
 
     def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+        self.wait_calls.append({
+            "runtime_handle": runtime_handle,
+            "poll_interval": poll_interval,
+            "timeout_seconds": timeout_seconds,
+        })
         if self._transient_failures_remaining > 0:
             self._transient_failures_remaining -= 1
             raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
@@ -348,10 +354,14 @@ class FakeRuntimeRunner(FakeOmxRunner):
         )
 
     def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
-        del poll_interval, timeout_seconds
         if self.wait_errors:
+            self.wait_calls.append({
+                "runtime_handle": runtime_handle,
+                "poll_interval": poll_interval,
+                "timeout_seconds": timeout_seconds,
+            })
             raise self.wait_errors.pop(0)
-        return super().wait(runtime_handle)
+        return super().wait(runtime_handle, poll_interval=poll_interval, timeout_seconds=timeout_seconds)
 
     def get_session_id(self, runtime_handle: str) -> str | None:
         suffix = runtime_handle.removeprefix(f"{self.runtime_name}-runtime-")
