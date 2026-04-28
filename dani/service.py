@@ -255,6 +255,8 @@ class DaniService:
             return {"status": "ignored", "reason": "untracked_pr"}
         latest_review_round = self._latest_review_round(event.repo_full_name, pr_number)
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
+        source_job = self.storage.get_job(signature.get("job", ""))
+        lineage_metadata = self._automation_lineage_metadata(source_job)
         if latest_review_round >= self.config.review_rounds:
             verdict_job = self._enqueue_job(
                 repo,
@@ -263,6 +265,7 @@ class DaniService:
                 pr_number=pr_number,
                 metadata={
                     **pr_metadata,
+                    **lineage_metadata,
                     "title": (pr_metadata.get("title") or event.title or ""),
                 },
             )
@@ -277,6 +280,7 @@ class DaniService:
             review_round=next_round,
             metadata={
                 **pr_metadata,
+                **lineage_metadata,
                 "title": (pr_metadata.get("title") or event.title or ""),
             },
         )
@@ -310,6 +314,32 @@ class DaniService:
         )
         return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
 
+    def _automation_lineage_metadata(self, source_job: JobRecord | None) -> dict[str, Any]:
+        if source_job is None:
+            return {}
+        keys = ("external_contribution", "pr_author_login", "pr_author_association")
+        return {key: source_job.metadata[key] for key in keys if key in source_job.metadata}
+
+    def _external_pr_metadata(self, event: NormalizedEvent) -> dict[str, Any]:
+        pull_request = event.payload.get("pull_request") or {}
+        user = pull_request.get("user") or {}
+        metadata: dict[str, Any] = {"external_contribution": True}
+        if isinstance(user, dict) and user.get("login"):
+            metadata["pr_author_login"] = str(user["login"])
+        author_association = pull_request.get("author_association")
+        if author_association:
+            metadata["pr_author_association"] = str(author_association)
+        return metadata
+
+    def _pull_request_author_is_repo_owner(self, repo_full_name: str, pull_request: dict[str, Any]) -> bool:
+        repo_owner = repo_full_name.split("/", 1)[0].lower()
+        author_association = str(pull_request.get("author_association") or "").upper()
+        if author_association == "OWNER":
+            return True
+        user = pull_request.get("user") or {}
+        login = str(user.get("login") or "").lower() if isinstance(user, dict) else ""
+        return bool(login) and login == repo_owner
+
     def _handle_final_verdict_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         pr_number = int(signature["pr"])
         event_key = self._agent_event_key(signature, default_pr=pr_number)
@@ -317,13 +347,16 @@ class DaniService:
             return {"status": "ignored", "reason": "duplicate_agent_event"}
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
+        pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
+        if not self._pull_request_author_is_repo_owner(event.repo_full_name, pull_request):
+            self.storage.record_processed_event(event_key)
+            return {"status": "approved", "reason": "human_merge_required", "pr_number": pr_number}
         try:
             self.github.merge_pull_request(event.repo_full_name, pr_number)
         except MergeConflictError as exc:
             repo = self.storage.get_repo(event.repo_full_name)
             if repo is None:
                 return {"status": "ignored", "reason": "missing_repo"}
-            pull_request = self.github.get_pull_request(event.repo_full_name, pr_number)
             issue_number = self._issue_number_for_signature_event(event.repo_full_name, signature, pr_number=pr_number)
             if issue_number is None:
                 issue_number = self._extract_issue_number(pull_request.get("body"))
@@ -361,16 +394,7 @@ class DaniService:
         if not self._is_pr_open(event.repo_full_name, pr_number):
             return {"status": "ignored", "reason": "pr_not_open"}
         pr_metadata = self._pull_request_metadata(event.repo_full_name, pr_number)
-        if bool(source_job and source_job.metadata.get("external_contribution")):
-            return self._handle_external_review_round_event(
-                repo,
-                event,
-                source_job=source_job,
-                pr_metadata=pr_metadata,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                review_round=review_round,
-            )
+        lineage_metadata = self._automation_lineage_metadata(source_job)
         if issue_number is None:
             return {"status": "ignored", "reason": "untracked_pr"}
         if not self._is_pr_open(event.repo_full_name, pr_number):
@@ -383,57 +407,13 @@ class DaniService:
             review_round=review_round,
             metadata={
                 **pr_metadata,
+                **lineage_metadata,
                 "title": (pr_metadata.get("title") or event.title or ""),
                 "review_comment_body": event.body or "",
                 "triggering_review_round": review_round,
             },
         )
         return {"status": "queued", "job_id": next_job.id, "stage": next_job.stage}
-
-    def _handle_external_review_round_event(
-        self,
-        repo: RepoConfig,
-        event: NormalizedEvent,
-        *,
-        source_job: JobRecord,
-        pr_metadata: dict[str, str],
-        issue_number: int | None,
-        pr_number: int,
-        review_round: int,
-    ) -> dict[str, Any]:
-        if self._is_approve_comment(event.body):
-            verdict_job = self._enqueue_job(
-                repo,
-                stage="final_verdict",
-                issue_number=issue_number,
-                pr_number=pr_number,
-                review_round=review_round,
-                metadata={
-                    **pr_metadata,
-                    "title": (pr_metadata.get("title") or event.title or ""),
-                    "external_contribution": True,
-                },
-            )
-            return {"status": "queued", "job_id": verdict_job.id, "stage": verdict_job.stage}
-
-        completed_reviews = self._completed_external_review_count(event.repo_full_name, pr_number)
-        if source_job.status != "completed":
-            completed_reviews += 1
-        if completed_reviews >= self.config.external_review_limit and not self._has_human_escalation(
-            event.repo_full_name, pr_number
-        ):
-            escalation_job = self._enqueue_external_human_escalation(
-                repo,
-                issue_number=issue_number,
-                pr_number=pr_number,
-                metadata={
-                    **pr_metadata,
-                    "title": (pr_metadata.get("title") or event.title or ""),
-                    "external_contribution": True,
-                },
-            )
-            return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
-        return {"status": "updated", "stage": "review_round"}
 
     def _enqueue_job(
         self,
@@ -1323,18 +1303,6 @@ class DaniService:
             )
             return self._apply_bridge_context(prompt, bridge_prompt)
 
-        if job.stage == "human_escalation":
-            prompt = self._build_human_escalation_prompt(
-                repo,
-                job,
-                issue_number,
-                pr_number,
-                pr_title,
-                pr_body,
-                resolved_runtime,
-            )
-            return self._apply_bridge_context(prompt, bridge_prompt)
-
         if job.stage == "merge_conflict_resolution":
             prompt = self._build_merge_conflict_resolution_prompt(
                 repo,
@@ -1375,9 +1343,6 @@ class DaniService:
             return
         if job.stage == "review_round":
             self._verify_review_round_side_effect(repo, job)
-            return
-        if job.stage == "human_escalation":
-            self._verify_human_escalation_side_effect(repo, job)
             return
         if job.stage == "merge_conflict_resolution":
             self._verify_merge_conflict_resolution_side_effect(repo, job)
@@ -1559,7 +1524,6 @@ class DaniService:
         pr_discussion = self._render_pr_discussion(repo.full_name, pr_number)
         if pr_discussion:
             discussion_parts.append(pr_discussion)
-        is_external_review = bool(job.metadata.get("external_contribution"))
         return render_prompt(
             "review_round",
             {
@@ -1569,13 +1533,8 @@ class DaniService:
                 "pr_body": pr_body,
                 "discussion": "\n\n".join(discussion_parts),
                 "round_number": job.review_round or 1,
-                "round_total": self.config.external_review_limit if is_external_review else self.config.review_rounds,
-                "review_mode_note": (
-                    "This is an external contribution PR. The contributor owns any follow-up implementation. "
-                    "If the PR is ready to merge, include /approve in your review comment so dani can run the final verdict pass."
-                    if is_external_review
-                    else ""
-                ),
+                "round_total": self.config.review_rounds,
+                "review_mode_note": "",
                 "signature": build_signature(**signature_fields),
             },
             runtime=runtime,
@@ -1631,45 +1590,11 @@ class DaniService:
                 "pr_title": pr_title,
                 "pr_body": pr_body,
                 "discussion": "\n\n".join(discussion_parts),
-                "review_cycle": (
-                    f"Review pass: {job.review_round} / {self.config.external_review_limit}"
-                    if job.review_round and job.metadata.get("external_contribution")
-                    else ""
-                ),
+                "review_cycle": "",
                 "approve_signature": build_signature(
                     stage="final_verdict", job=job.id, pr=pr_number, verdict="APPROVE"
                 ),
                 "reject_signature": build_signature(stage="final_verdict", job=job.id, pr=pr_number, verdict="REJECT"),
-            },
-            runtime=runtime,
-        )
-
-    def _build_human_escalation_prompt(
-        self,
-        repo: RepoConfig,
-        job: JobRecord,
-        issue_number: int,
-        pr_number: int,
-        pr_title: str,
-        pr_body: str,
-        runtime: str,
-    ) -> str:
-        discussion_parts = []
-        if issue_number:
-            discussion_parts.append(f"Related issue: #{issue_number}")
-        pr_discussion = self._render_pr_discussion(repo.full_name, pr_number)
-        if pr_discussion:
-            discussion_parts.append(pr_discussion)
-        return render_prompt(
-            "human_escalation",
-            {
-                "repo": repo.full_name,
-                "pr_number": pr_number,
-                "pr_title": pr_title,
-                "pr_body": pr_body,
-                "discussion": "\n\n".join(discussion_parts),
-                "review_limit": self.config.external_review_limit,
-                "signature": build_signature(stage="human_escalation", job=job.id, pr=pr_number),
             },
             runtime=runtime,
         )
@@ -1745,11 +1670,6 @@ class DaniService:
             or self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), reject_signature)
         ):
             raise RuntimeError("final-verdict-comment-missing")
-
-    def _verify_human_escalation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
-        signature = build_signature(stage="human_escalation", job=job.id, pr=int(job.pr_number or 0))
-        if not self._has_exact_pr_signature(repo.full_name, int(job.pr_number or 0), signature):
-            raise RuntimeError("human-escalation-comment-missing")
 
     def _has_exact_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> bool:
         return bool(
@@ -1970,22 +1890,10 @@ class DaniService:
         if not self.storage.record_processed_event(event_key):
             return {"status": "ignored", "reason": "duplicate_external_pr_event"}
 
-        if self._has_human_escalation(event.repo_full_name, event.number):
-            return {"status": "ignored", "reason": "human_review_required"}
-
-        completed_reviews = self._completed_external_review_count(event.repo_full_name, event.number)
         consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
-        if completed_reviews >= self.config.external_review_limit:
-            escalation_job = self._enqueue_external_human_escalation(
-                repo,
-                issue_number=issue_number,
-                pr_number=event.number,
-                metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
-            )
-            return {"status": "queued", "job_id": escalation_job.id, "stage": escalation_job.stage}
 
-        if len(consumed_review_rounds) >= self.config.external_review_limit:
-            return {"status": "ignored", "reason": "external_review_limit_pending"}
+        if len(consumed_review_rounds) >= self.config.review_rounds:
+            return {"status": "ignored", "reason": "external_review_rounds_exhausted"}
 
         next_review_round = max(consumed_review_rounds, default=0) + 1
         job = self._enqueue_job(
@@ -1994,7 +1902,11 @@ class DaniService:
             issue_number=issue_number,
             pr_number=event.number,
             review_round=next_review_round,
-            metadata={"title": event.title or "", "body": event.body or "", "external_contribution": True},
+            metadata={
+                "title": event.title or "",
+                "body": event.body or "",
+                **self._external_pr_metadata(event),
+            },
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
@@ -2055,22 +1967,6 @@ class DaniService:
         self.github.close_pull_request(event.repo_full_name, event.number)
         return {"status": "closed", "reason": "contributor_account_too_new", "pr_number": event.number}
 
-    def _enqueue_external_human_escalation(
-        self,
-        repo: RepoConfig,
-        *,
-        issue_number: int | None,
-        pr_number: int,
-        metadata: dict[str, Any],
-    ) -> JobRecord:
-        return self._enqueue_job(
-            repo,
-            stage="human_escalation",
-            issue_number=issue_number,
-            pr_number=pr_number,
-            metadata=metadata,
-        )
-
     def _agent_event_key(self, signature: dict[str, str], *, default_pr: int | None = None) -> str:
         fields = [("stage", signature.get("stage", ""))]
         for key in ("pr", "round", "job", "verdict"):
@@ -2115,13 +2011,6 @@ class DaniService:
         ]
         return max(rounds, default=0)
 
-    def _completed_external_review_count(self, repo_full_name: str, pr_number: int) -> int:
-        return sum(
-            1
-            for job in self.storage.find_jobs(repo_full_name=repo_full_name, stage="review_round", pr_number=pr_number)
-            if job.metadata.get("external_contribution") and job.status == "completed"
-        )
-
     def _consumed_external_review_rounds(self, repo_full_name: str, pr_number: int) -> set[int]:
         return {
             int(job.review_round)
@@ -2132,11 +2021,6 @@ class DaniService:
                 and job.status in {"queued", "launched", "completed"}
             )
         }
-
-    def _has_human_escalation(self, repo_full_name: str, pr_number: int) -> bool:
-        return bool(
-            self.storage.find_jobs(repo_full_name=repo_full_name, stage="human_escalation", pr_number=pr_number)
-        )
 
     def _issue_number_for_signature_event(
         self,
