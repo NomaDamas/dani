@@ -501,7 +501,7 @@ class DaniService:
 
     def _run_comment_recovery_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
         preferred_runtime = self._preferred_runtime_for(job)
-        runtime = preferred_runtime
+        runtime = self._runtime_for_comment_recovery_resume(job, preferred_runtime=preferred_runtime)
         prompt = self._build_prompt(repo, job, runtime=runtime)
         runner = self._runner_for_runtime(runtime)
         resume_session_id = self._recovery_resume_session_id(job, runtime=runtime)
@@ -576,6 +576,20 @@ class DaniService:
         if not runner.can_resume(source_session_id):
             return None
         return source_session_id
+
+    def _runtime_for_comment_recovery_resume(self, job: JobRecord, *, preferred_runtime: str) -> str:
+        source_runtime = job.metadata.get("source_effective_runtime") or job.metadata.get(
+            "source_native_session_runtime"
+        )
+        source_session_id = job.metadata.get("source_omx_session_id")
+        if not isinstance(source_runtime, str) or not source_runtime:
+            return preferred_runtime
+        if not isinstance(source_session_id, str) or not source_session_id:
+            return preferred_runtime
+        runtime = normalize_runtime(source_runtime)
+        if self._runner_for_runtime(runtime).can_resume(source_session_id):
+            return runtime
+        return preferred_runtime
 
     def _comment_recovery_side_effect_exists(self, repo: RepoConfig, job: JobRecord) -> bool:
         with contextlib.suppress(Exception):
@@ -939,6 +953,13 @@ class DaniService:
                     if source_session is not None and source_session.omx_session_id
                     else job.metadata.get("omx_session_id")
                 ),
+                "source_preferred_runtime": (source_session.preferred_runtime if source_session is not None else None),
+                "source_effective_runtime": (
+                    effective_session_runtime(source_session) if source_session is not None else None
+                ),
+                "source_native_session_runtime": (
+                    source_session.native_session_runtime if source_session is not None else None
+                ),
             },
         )
         self.storage.update_job(
@@ -987,7 +1008,9 @@ class DaniService:
             "comment_recovery_attempts": job.metadata.get("comment_recovery_attempt", 1),
             "comment_recovery_job_id": job.id,
             "comment_recovery_session_id": job.session_id,
+            "comment_recovery_effective_runtime": job.metadata.get("effective_runtime"),
             "comment_recovery_runtime_handle": job.metadata.get("recovery_runtime_handle"),
+            "comment_recovery_resume_error": job.metadata.get("comment_recovery_resume_error"),
         }
         self.storage.update_job(source.id, status="completed", metadata=metadata)
 
@@ -1020,7 +1043,9 @@ class DaniService:
                 "comment_recovery_attempts": job.metadata.get("comment_recovery_attempt", 1),
                 "comment_recovery_job_id": job.id,
                 "comment_recovery_session_id": job.session_id,
+                "comment_recovery_effective_runtime": job.metadata.get("effective_runtime"),
                 "comment_recovery_runtime_handle": job.metadata.get("recovery_runtime_handle"),
+                "comment_recovery_resume_error": job.metadata.get("comment_recovery_resume_error"),
                 "comment_recovery_last_error": str(exc),
             },
         )

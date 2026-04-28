@@ -2532,6 +2532,78 @@ class RecoveryTransientFailureRunner(MissingIssueCommentRunner):
         return session
 
 
+class CommentRecoveryRuntimeRunner(FakeRuntimeRunner):
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+        if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
+            expected_signature = str(job.metadata["expected_signature"])
+            self.github.add_issue_signature(job.repo_full_name, int(job.issue_number or 0), expected_signature)
+        return super().resume(repo_path, job, prompt, omx_session_id)
+
+
+def test_issue_request_recovery_resumes_source_effective_omx_session_when_preferred_runtime_is_omo(
+    tmp_path: Path,
+) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omo_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMO)
+    omx_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, omo_runner),
+        dev_syncer=FakeGitDevSyncer(),
+        runtime_runners={RUNTIME_OMX: cast(AgentRunner, omx_runner)},
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    source_job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=48,
+        status="failed",
+        metadata={
+            "title": "Need planning",
+            "body": "Need planning",
+            "preferred_runtime": RUNTIME_OMO,
+            "effective_runtime": RUNTIME_OMX,
+        },
+    )
+    service.storage.create_job(source_job)
+    service.storage.create_session(
+        SessionRecord(
+            repo_full_name="acme/demo",
+            stage="issue_request",
+            runtime_handle=f"omx-runtime-{source_job.id}",
+            prompt_path=str(tmp_path / "prompt.txt"),
+            script_path=str(tmp_path / "run.sh"),
+            worktree_path=str(tmp_path),
+            job_id=source_job.id,
+            issue_number=48,
+            omx_session_id="omx-original",
+            preferred_runtime=RUNTIME_OMO,
+            effective_runtime=RUNTIME_OMX,
+            native_session_runtime=RUNTIME_OMX,
+        )
+    )
+    service.queue_manager.submit = lambda queued_job: None  # type: ignore[method-assign]
+
+    assert service._handle_job_failure(source_job, RuntimeError("issue-request-comment-missing"), 1, [])
+    recovery_job = next(job for job in service.storage.list_jobs() if job.stage == "issue_request_recovery")
+
+    service._run_comment_recovery_attempt(repo, recovery_job)
+
+    assert omo_runner.resumes == []
+    assert omo_runner.launches == []
+    assert [record["omx_session_id"] for record in omx_runner.resumes] == ["omx-original"]
+    assert omx_runner.launches == []
+    assert recovery_job.metadata["preferred_runtime"] == RUNTIME_OMO
+    assert recovery_job.metadata["source_effective_runtime"] == RUNTIME_OMX
+    assert recovery_job.metadata["effective_runtime"] == RUNTIME_OMX
+
+
 def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_fails(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
