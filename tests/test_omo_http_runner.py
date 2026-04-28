@@ -234,6 +234,16 @@ def test_launch_issue_followup_stage_skips_ultrawork_prefix(runner_factory, tmp_
     assert client.prompt_calls[0]["prompt_text"] == "Refine plan based on follow-up."
 
 
+@pytest.mark.parametrize("stage", ["issue_request_recovery", "issue_followup_recovery"])
+def test_launch_issue_comment_recovery_stages_skip_ultrawork_prefix(runner_factory, tmp_path: Path, stage: str) -> None:
+    runner, client, _ = runner_factory()
+    job = JobRecord(repo_full_name="acme/demo", stage=stage, issue_number=2)
+
+    runner.launch(tmp_path, job, "Post the missing Dani signature comment exactly once.")
+
+    assert client.prompt_calls[0]["prompt_text"] == "Post the missing Dani signature comment exactly once."
+
+
 def test_launch_does_not_double_prefix_when_prompt_already_starts_with_ultrawork(
     runner_factory, tmp_path: Path
 ) -> None:

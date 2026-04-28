@@ -44,6 +44,17 @@ INELIGIBLE_EXTERNAL_PR_COMMENT = (
 )
 
 RETARGET_REQUEST_STAGE = "retarget_request"
+ISSUE_REQUEST_RECOVERY_STAGE = "issue_request_recovery"
+ISSUE_FOLLOWUP_RECOVERY_STAGE = "issue_followup_recovery"
+ISSUE_COMMENT_RECOVERY_STAGES = {
+    ISSUE_REQUEST_RECOVERY_STAGE: "issue_request",
+    ISSUE_FOLLOWUP_RECOVERY_STAGE: "issue_followup",
+}
+ISSUE_COMMENT_MISSING_ERRORS = {
+    "issue-request-comment-missing",
+    "issue-followup-comment-missing",
+}
+MAX_COMMENT_RECOVERY_ATTEMPTS = 1
 
 RETRY_BACKOFF_SECONDS: list[int] = [60, 180, 600]
 
@@ -434,19 +445,29 @@ class DaniService:
                 if self._handle_transient_failure(repo, job, exc, attempt, max_attempts, retry_history):
                     return
             except Exception as exc:
-                self._handle_job_failure(job, exc, attempt, retry_history)
+                if self._handle_job_failure(job, exc, attempt, retry_history):
+                    return
                 job.status = "failed"
                 return
             else:
-                self.storage.update_job(
-                    job.id,
-                    status="completed",
-                    metadata={**job.metadata, "retry_attempts": attempt - 1, "retry_history": retry_history},
-                )
-                job.status = "completed"
+                self._handle_job_success(job, attempt, retry_history)
                 return
 
+    def _handle_job_success(self, job: JobRecord, attempt: int, retry_history: list[dict[str, str]]) -> None:
+        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+            self._complete_comment_recovery(job)
+        self.storage.update_job(
+            job.id,
+            status="completed",
+            metadata={**job.metadata, "retry_attempts": attempt - 1, "retry_history": retry_history},
+        )
+        job.status = "completed"
+
     def _run_job_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
+        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+            self._run_comment_recovery_attempt(repo, job)
+            return
+
         preferred_runtime = self._preferred_runtime_for(job)
         lineage_session = self._lineage_session_for(job)
         initial_runtime = self._initial_runtime_for(job, preferred_runtime, lineage_session)
@@ -477,6 +498,112 @@ class DaniService:
             session_id=session.id,
             metadata={**job.metadata, "effective_runtime": session.effective_runtime or initial_runtime},
         )
+
+    def _run_comment_recovery_attempt(self, repo: RepoConfig, job: JobRecord) -> None:
+        preferred_runtime = self._preferred_runtime_for(job)
+        runtime = self._runtime_for_comment_recovery_resume(job, preferred_runtime=preferred_runtime)
+        prompt = self._build_prompt(repo, job, runtime=runtime)
+        runner = self._runner_for_runtime(runtime)
+        resume_session_id = self._recovery_resume_session_id(job, runtime=runtime)
+        if resume_session_id:
+            try:
+                session = runner.resume(Path(repo.local_path), job, prompt, resume_session_id)
+            except Exception as exc:
+                job.metadata["comment_recovery_resume_error"] = str(exc)
+                if self._comment_recovery_side_effect_exists(repo, job):
+                    self._mark_comment_recovery_side_effect_already_posted(job)
+                    return
+                session = runner.launch(Path(repo.local_path), job, prompt)
+            else:
+                try:
+                    self._wait_for_comment_recovery_session(
+                        runner, repo, job, session, preferred_runtime=preferred_runtime, runtime=runtime
+                    )
+                except Exception as exc:
+                    job.metadata["comment_recovery_resume_error"] = str(exc)
+                    if self._comment_recovery_side_effect_exists(repo, job):
+                        self._mark_comment_recovery_side_effect_already_posted(job)
+                        return
+                    session = runner.launch(Path(repo.local_path), job, prompt)
+                else:
+                    return
+        else:
+            session = runner.launch(Path(repo.local_path), job, prompt)
+        self._wait_for_comment_recovery_session(
+            runner, repo, job, session, preferred_runtime=preferred_runtime, runtime=runtime
+        )
+
+    def _wait_for_comment_recovery_session(
+        self,
+        runner: AgentRunner,
+        repo: RepoConfig,
+        job: JobRecord,
+        session: SessionRecord,
+        *,
+        preferred_runtime: str,
+        runtime: str,
+    ) -> None:
+        self._annotate_session_record(
+            session,
+            preferred_runtime=preferred_runtime,
+            effective_runtime=runtime,
+            fallback_reason=None,
+        )
+        self.storage.create_session(session)
+        self.storage.update_job(
+            job.id,
+            status="launched",
+            session_id=session.id,
+            metadata={
+                **job.metadata,
+                "effective_runtime": session.effective_runtime or runtime,
+                "recovery_runtime_handle": session.runtime_handle,
+            },
+        )
+        job.session_id = session.id
+        job.metadata["effective_runtime"] = session.effective_runtime or runtime
+        job.metadata["recovery_runtime_handle"] = session.runtime_handle
+        try:
+            runner.wait(session.runtime_handle)
+            self._verify_side_effect(repo, job)
+        except Exception:
+            self._finalize_session(session, status="failed", termination_reason="failed")
+            raise
+        self._finalize_session(session, status="completed", termination_reason="completed")
+
+    def _recovery_resume_session_id(self, job: JobRecord, *, runtime: str) -> str | None:
+        source_session_id = job.metadata.get("source_omx_session_id")
+        if not isinstance(source_session_id, str) or not source_session_id:
+            return None
+        runner = self._runner_for_runtime(runtime)
+        if not runner.can_resume(source_session_id):
+            return None
+        return source_session_id
+
+    def _runtime_for_comment_recovery_resume(self, job: JobRecord, *, preferred_runtime: str) -> str:
+        source_runtime = job.metadata.get("source_effective_runtime") or job.metadata.get(
+            "source_native_session_runtime"
+        )
+        source_session_id = job.metadata.get("source_omx_session_id")
+        if not isinstance(source_runtime, str) or not source_runtime:
+            return preferred_runtime
+        if not isinstance(source_session_id, str) or not source_session_id:
+            return preferred_runtime
+        runtime = normalize_runtime(source_runtime)
+        if self._runner_for_runtime(runtime).can_resume(source_session_id):
+            return runtime
+        return preferred_runtime
+
+    def _comment_recovery_side_effect_exists(self, repo: RepoConfig, job: JobRecord) -> bool:
+        with contextlib.suppress(Exception):
+            self._verify_side_effect(repo, job)
+            return True
+        return False
+
+    def _mark_comment_recovery_side_effect_already_posted(self, job: JobRecord) -> None:
+        metadata = {**job.metadata, "note": "side_effect_already_posted"}
+        self.storage.update_job(job.id, metadata=metadata)
+        job.metadata = metadata
 
     def _execute_job_session(
         self,
@@ -692,6 +819,8 @@ class DaniService:
             self._verify_side_effect(repo, job)
             side_effect_exists = True
         if side_effect_exists:
+            if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+                self._complete_comment_recovery(job)
             self.storage.update_job(
                 job.id,
                 status="completed",
@@ -723,6 +852,8 @@ class DaniService:
                     "retry_history": retry_history,
                 },
             )
+            if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+                self._fail_comment_recovery(job, RuntimeError(f"retry_exhausted: {exc}"), attempt, retry_history)
             job.status = "failed"
             return True
         backoff = RETRY_BACKOFF_SECONDS[attempt - 1]
@@ -741,7 +872,12 @@ class DaniService:
         exc: Exception,
         attempt: int,
         retry_history: list[dict[str, str]],
-    ) -> None:
+    ) -> bool:
+        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+            self._fail_comment_recovery(job, exc, attempt, retry_history)
+            return False
+        if self._should_recover_missing_issue_comment(job, exc) and self._enqueue_comment_recovery(job, exc):
+            return True
         metadata = {
             **job.metadata,
             "error": str(exc),
@@ -762,6 +898,161 @@ class DaniService:
             with contextlib.suppress(Exception):
                 self._post_session_lost_warning(job)
         self.storage.update_job(job.id, status="failed", metadata=metadata)
+        return False
+
+    def _should_recover_missing_issue_comment(self, job: JobRecord, exc: Exception) -> bool:
+        return job.stage in {"issue_request", "issue_followup"} and str(exc) in ISSUE_COMMENT_MISSING_ERRORS
+
+    def _enqueue_comment_recovery(self, job: JobRecord, exc: Exception) -> bool:
+        original_error = str(exc)
+        attempts = int(job.metadata.get("comment_recovery_attempts") or 0)
+        existing = self._existing_comment_recovery_job(job)
+        if existing is not None and existing.status in {"queued", "launched", "retrying"}:
+            self.storage.update_job(
+                job.id,
+                status="recovering",
+                metadata={
+                    **job.metadata,
+                    "error": original_error,
+                    "original_error": original_error,
+                    "comment_recovery_attempts": attempts,
+                    "comment_recovery_job_id": existing.id,
+                },
+            )
+            job.status = "recovering"
+            return True
+        if attempts >= MAX_COMMENT_RECOVERY_ATTEMPTS:
+            return False
+
+        repo = self.storage.get_repo(job.repo_full_name)
+        if repo is None or job.issue_number is None:
+            return False
+        recovery_stage = ISSUE_REQUEST_RECOVERY_STAGE if job.stage == "issue_request" else ISSUE_FOLLOWUP_RECOVERY_STAGE
+        expected_signature = build_signature(stage=job.stage, job=job.id, issue=int(job.issue_number))
+        source_session = self.storage.find_latest_session(
+            repo_full_name=job.repo_full_name,
+            stage=job.stage,
+            job_id=job.id,
+            issue_number=job.issue_number,
+        )
+        recovery_attempt = attempts + 1
+        recovery_job = self._enqueue_job(
+            repo,
+            stage=recovery_stage,
+            issue_number=job.issue_number,
+            metadata={
+                "title": job.metadata.get("title", ""),
+                "body": job.metadata.get("body", ""),
+                "comment_body": job.metadata.get("comment_body", ""),
+                "source_job_id": job.id,
+                "source_stage": job.stage,
+                "original_error": original_error,
+                "expected_signature": expected_signature,
+                "comment_recovery_attempt": recovery_attempt,
+                "preferred_runtime": job.metadata.get(
+                    "preferred_runtime", normalize_runtime(self.config.agent_runtime)
+                ),
+                "source_omx_session_id": (
+                    source_session.omx_session_id
+                    if source_session is not None and source_session.omx_session_id
+                    else job.metadata.get("omx_session_id")
+                ),
+                "source_preferred_runtime": (source_session.preferred_runtime if source_session is not None else None),
+                "source_effective_runtime": (
+                    effective_session_runtime(source_session) if source_session is not None else None
+                ),
+                "source_native_session_runtime": (
+                    source_session.native_session_runtime if source_session is not None else None
+                ),
+            },
+        )
+        self.storage.update_job(
+            job.id,
+            status="recovering",
+            metadata={
+                **job.metadata,
+                "error": original_error,
+                "original_error": original_error,
+                "comment_recovery_attempts": recovery_attempt,
+                "comment_recovery_job_id": recovery_job.id,
+            },
+        )
+        job.status = "recovering"
+        job.metadata = {
+            **job.metadata,
+            "error": original_error,
+            "original_error": original_error,
+            "comment_recovery_attempts": recovery_attempt,
+            "comment_recovery_job_id": recovery_job.id,
+        }
+        return True
+
+    def _existing_comment_recovery_job(self, job: JobRecord) -> JobRecord | None:
+        recovery_stages = set(ISSUE_COMMENT_RECOVERY_STAGES)
+        for candidate in reversed(
+            self.storage.find_jobs(repo_full_name=job.repo_full_name, issue_number=job.issue_number)
+        ):
+            if candidate.stage not in recovery_stages:
+                continue
+            if candidate.metadata.get("source_job_id") == job.id:
+                return candidate
+        return None
+
+    def _complete_comment_recovery(self, job: JobRecord) -> None:
+        source_job_id = str(job.metadata.get("source_job_id") or "")
+        if not source_job_id:
+            return
+        source = self.storage.get_job(source_job_id)
+        if source is None:
+            return
+        metadata = {
+            **source.metadata,
+            "error": None,
+            "original_error": job.metadata.get("original_error"),
+            "comment_recovery_attempts": job.metadata.get("comment_recovery_attempt", 1),
+            "comment_recovery_job_id": job.id,
+            "comment_recovery_session_id": job.session_id,
+            "comment_recovery_effective_runtime": job.metadata.get("effective_runtime"),
+            "comment_recovery_runtime_handle": job.metadata.get("recovery_runtime_handle"),
+            "comment_recovery_resume_error": job.metadata.get("comment_recovery_resume_error"),
+        }
+        self.storage.update_job(source.id, status="completed", metadata=metadata)
+
+    def _fail_comment_recovery(
+        self,
+        job: JobRecord,
+        exc: Exception,
+        attempt: int,
+        retry_history: list[dict[str, str]],
+    ) -> None:
+        source_job_id = str(job.metadata.get("source_job_id") or "")
+        original_error = str(job.metadata.get("original_error") or str(exc))
+        metadata = {
+            **job.metadata,
+            "error": str(exc),
+            "retry_attempts": attempt - 1,
+            "retry_history": retry_history,
+        }
+        self.storage.update_job(job.id, status="failed", metadata=metadata)
+        source = self.storage.get_job(source_job_id) if source_job_id else None
+        if source is None:
+            return
+        self.storage.update_job(
+            source.id,
+            status="failed",
+            metadata={
+                **source.metadata,
+                "error": original_error,
+                "original_error": original_error,
+                "comment_recovery_attempts": job.metadata.get("comment_recovery_attempt", 1),
+                "comment_recovery_job_id": job.id,
+                "comment_recovery_session_id": job.session_id,
+                "comment_recovery_effective_runtime": job.metadata.get("effective_runtime"),
+                "comment_recovery_runtime_handle": job.metadata.get("recovery_runtime_handle"),
+                "comment_recovery_resume_error": job.metadata.get("comment_recovery_resume_error"),
+                "comment_recovery_last_error": str(exc),
+            },
+        )
 
     def _run_dev_sync_job(self, repo: RepoConfig, job: JobRecord) -> None:
         session = None
@@ -970,6 +1261,9 @@ class DaniService:
             )
             return self._apply_bridge_context(prompt, bridge_prompt)
 
+        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+            return self._build_issue_comment_recovery_prompt(repo, job, issue_number, issue_title, issue_body)
+
         if job.stage == "review_round":
             prompt = self._build_review_round_prompt(
                 repo,
@@ -1025,6 +1319,9 @@ class DaniService:
             return
         if job.stage == "issue_followup":
             self._verify_issue_followup_side_effect(repo, job)
+            return
+        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+            self._verify_issue_comment_recovery_side_effect(repo, job)
             return
         if job.stage == "implementation":
             self._verify_implementation_side_effect(repo, job)
@@ -1149,6 +1446,44 @@ class DaniService:
                 "signature": build_signature(stage="issue_followup", job=job.id, issue=issue_number),
             },
             runtime=runtime,
+        )
+
+    def _build_issue_comment_recovery_prompt(
+        self,
+        repo: RepoConfig,
+        job: JobRecord,
+        issue_number: int,
+        issue_title: str,
+        issue_body: str,
+    ) -> str:
+        original_stage = ISSUE_COMMENT_RECOVERY_STAGES[job.stage]
+        source_job_id = str(job.metadata.get("source_job_id", ""))
+        expected_signature = str(job.metadata.get("expected_signature", ""))
+        original_error = str(job.metadata.get("original_error", ""))
+        comment_body = str(job.metadata.get("comment_body", ""))
+        return (
+            f"You are operating inside repository: {repo.full_name}\n"
+            f"Local path: {repo.local_path}\n"
+            f"Recovery task for GitHub issue #{issue_number}: {issue_title}\n\n"
+            "A previous Dani OMX session ended without leaving the required GitHub issue comment, "
+            f"so side-effect verification failed with `{original_error}`.\n\n"
+            "Strict recovery instructions:\n"
+            "- Do not write code, edit files, create branches, open PRs, or run implementation work.\n"
+            "- Leave one GitHub issue comment exactly once, then exit.\n"
+            "- The comment must include the exact Dani signature below unchanged; do not replace it with this "
+            "recovery job's id.\n"
+            "- Keep the comment concise and self-contained for the visible issue discussion.\n\n"
+            f"Repository: {repo.full_name}\n"
+            f"Issue number: {issue_number}\n"
+            f"Issue title: {issue_title}\n\n"
+            f"Original issue body:\n{issue_body}\n\n"
+            f"Latest follow-up comment, if any:\n{comment_body}\n\n"
+            f"Original job id: {source_job_id}\n"
+            f"Original stage: {original_stage}\n"
+            f"Required exact Dani signature:\n{expected_signature}\n\n"
+            "Post it with gh (write the comment to a file first, then send it):\n"
+            f"gh issue comment {issue_number} --repo {repo.full_name} --body-file <recovery-comment.md>\n\n"
+            "After posting the comment, exit."
         )
 
     def _build_review_round_prompt(
@@ -1299,6 +1634,14 @@ class DaniService:
         signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
         if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
             raise RuntimeError("issue-followup-comment-missing")
+
+    def _verify_issue_comment_recovery_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
+        signature = str(job.metadata.get("expected_signature") or "")
+        if not signature:
+            raise RuntimeError("issue-comment-recovery-missing-signature")
+        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
+            original_error = str(job.metadata.get("original_error") or "issue-comment-missing")
+            raise RuntimeError(original_error)
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature_fields: dict[str, int | str] = {
