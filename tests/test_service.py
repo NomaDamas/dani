@@ -2852,3 +2852,263 @@ def test_recovery_transient_exhaustion_fails_source_job_with_recovery_metadata(
     assert source_job.metadata["original_error"] == "issue-request-comment-missing"
     assert source_job.metadata["comment_recovery_job_id"] == recovery_job.id
     assert source_job.metadata["comment_recovery_last_error"].startswith("retry_exhausted:")
+
+
+def test_service_rehydrates_queued_jobs_on_startup(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    first_service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    first_service.register_repo("acme/demo", str(tmp_path))
+    queued = JobRecord(
+        repo_full_name="acme/demo",
+        stage="implementation",
+        issue_number=77,
+        metadata={"title": "Durable queue", "body": "Implement it"},
+    )
+    storage.create_job(queued)
+
+    runner = FakeOmxRunner(github)
+    restarted = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    restarted.wait_for_idle()
+
+    assert [record["job"].id for record in runner.launches] == [queued.id]
+    assert storage.get_job(queued.id).status == "completed"  # type: ignore[union-attr]
+
+
+def test_service_recovers_launched_jobs_on_startup(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    first_service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    first_service.register_repo("acme/demo", str(tmp_path))
+    launched = JobRecord(
+        repo_full_name="acme/demo",
+        stage="implementation",
+        issue_number=78,
+        status="launched",
+        session_id="stale-session",
+        metadata={"title": "Interrupted job", "body": "Resume after restart"},
+    )
+    storage.create_job(launched)
+
+    runner = FakeOmxRunner(github)
+    restarted = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    restarted.wait_for_idle()
+
+    recovered = storage.get_job(launched.id)
+    assert [record["job"].id for record in runner.launches] == [launched.id]
+    assert recovered is not None
+    assert recovered.status == "completed"
+    assert recovered.metadata["recovered_from_status"] == "launched"
+    assert recovered.metadata["recovered_session_id"] == "stale-session"
+
+
+def test_service_completes_launched_job_on_startup_when_side_effect_exists(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    first_service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    first_service.register_repo("acme/demo", str(tmp_path))
+    launched = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=79,
+        status="launched",
+        session_id="stale-session",
+        metadata={"title": "Interrupted issue", "body": "Resume after restart"},
+    )
+    storage.create_job(launched)
+    github.add_issue_signature("acme/demo", 79, build_signature(stage="issue_request", job=launched.id, issue=79))
+
+    runner = FakeOmxRunner(github)
+    restarted = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    restarted.wait_for_idle()
+
+    recovered = storage.get_job(launched.id)
+    assert runner.launches == []
+    assert recovered is not None
+    assert recovered.status == "completed"
+    assert recovered.metadata["note"] == "side_effect_already_posted"
+
+
+def test_job_status_is_launched_while_runner_waits(tmp_path: Path) -> None:
+    class BlockingWaitRunner(FakeOmxRunner):
+        def __init__(self, github: FakeGitHubCLI, storage: JsonStorage) -> None:
+            super().__init__(github)
+            self.storage = storage
+            self.wait_entered = threading.Event()
+            self.release_wait = threading.Event()
+            self.status_during_wait: str | None = None
+
+        def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+            del runtime_handle, poll_interval, timeout_seconds
+            job_id = self.launches[-1]["job"].id
+            job = self.storage.get_job(job_id)
+            self.status_during_wait = job.status if job is not None else None
+            self.wait_entered.set()
+            assert self.release_wait.wait(timeout=2)
+
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    runner = BlockingWaitRunner(github, storage)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+
+    event = NormalizedEvent(
+        kind="issue_opened",
+        repo_full_name="acme/demo",
+        action="opened",
+        number=80,
+        actor_login="human",
+        payload={},
+        body="Need durable launch state",
+        title="Need durable launch state",
+    )
+    thread = threading.Thread(target=service.handle_event, args=(event,))
+    thread.start()
+    assert runner.wait_entered.wait(timeout=2)
+
+    assert runner.status_during_wait == "launched"
+
+    runner.release_wait.set()
+    thread.join(timeout=2)
+    service.wait_for_idle()
+    job = service.storage.list_jobs()[0]
+    assert job.status == "completed"
+
+
+def test_launched_dev_sync_is_requeued_on_startup(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    first_service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    first_service.register_repo("acme/demo", str(tmp_path))
+    launched = JobRecord(
+        repo_full_name="acme/demo",
+        stage="dev_sync",
+        status="launched",
+        session_id="stale-sync-session",
+        metadata={"main_sha": "abc123", "ref": "refs/heads/main"},
+    )
+    storage.create_job(launched)
+
+    DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    ).wait_for_idle()
+
+    recovered = storage.get_job(launched.id)
+    assert recovered is not None
+    assert recovered.status == "completed"
+    assert recovered.metadata["recovered_from_status"] == "launched"
+    assert recovered.metadata["recovered_session_id"] == "stale-sync-session"
+
+
+def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    first_service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    first_service.register_repo("acme/demo", str(tmp_path))
+    source = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=81,
+        status="recovering",
+        metadata={"title": "Needs recovery", "body": "Missing comment"},
+    )
+    storage.create_job(source)
+    expected_signature = build_signature(stage="issue_request", job=source.id, issue=81)
+    recovery = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request_recovery",
+        issue_number=81,
+        status="launched",
+        session_id="stale-recovery-session",
+        metadata={
+            "source_job_id": source.id,
+            "source_stage": "issue_request",
+            "original_error": "issue-request-comment-missing",
+            "expected_signature": expected_signature,
+            "comment_recovery_attempt": 1,
+        },
+    )
+    storage.create_job(recovery)
+    github.add_issue_signature("acme/demo", 81, expected_signature)
+
+    runner = FakeOmxRunner(github)
+    DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, runner),
+        dev_syncer=FakeGitDevSyncer(),
+    ).wait_for_idle()
+
+    recovered_source = storage.get_job(source.id)
+    recovered_recovery = storage.get_job(recovery.id)
+    assert runner.launches == []
+    assert recovered_source is not None
+    assert recovered_source.status == "completed"
+    assert recovered_source.metadata["comment_recovery_job_id"] == recovery.id
+    assert recovered_recovery is not None
+    assert recovered_recovery.status == "completed"
