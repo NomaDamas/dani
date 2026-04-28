@@ -510,6 +510,9 @@ class DaniService:
                 session = runner.resume(Path(repo.local_path), job, prompt, resume_session_id)
             except Exception as exc:
                 job.metadata["comment_recovery_resume_error"] = str(exc)
+                if self._comment_recovery_side_effect_exists(repo, job):
+                    self._mark_comment_recovery_side_effect_already_posted(job)
+                    return
                 session = runner.launch(Path(repo.local_path), job, prompt)
             else:
                 try:

@@ -2489,6 +2489,20 @@ def test_issue_followup_missing_signature_recovers_with_original_signature(tmp_p
     assert expected_signature in omx_runner.launches[-1]["prompt"]
 
 
+class ResumeExceptionAfterPostingRecoveryRunner(MissingIssueCommentRunner):
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str):
+        if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
+            self._post_recovery_signature(job)
+            self.resumes.append({
+                "repo_path": str(repo_path),
+                "job": job,
+                "prompt": prompt,
+                "omx_session_id": omx_session_id,
+            })
+            raise RuntimeError("resume raised after posting signature")  # noqa: TRY003
+        return super().resume(repo_path, job, prompt, omx_session_id)
+
+
 class ResumeWaitFailureRecoveryRunner(MissingIssueCommentRunner):
     def __init__(self, github: FakeGitHubCLI, *, post_before_failure: bool = False) -> None:
         super().__init__(github, recover=False, resumable=True)
@@ -2715,6 +2729,48 @@ def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_
     assert [record["job"].stage for record in omx_runner.resumes] == ["issue_request_recovery"]
     assert [record["job"].stage for record in omx_runner.launches] == ["issue_request", "issue_request_recovery"]
     assert recovery_job.metadata["comment_recovery_resume_error"] == "resume failed"
+
+
+def test_issue_request_recovery_does_not_fresh_launch_when_resume_exception_posted_signature(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omx_runner = ResumeExceptionAfterPostingRecoveryRunner(github)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, omx_runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=50,
+            actor_login="human",
+            payload={},
+            body="Need planning",
+            title="Need planning",
+        )
+    )
+    service.wait_for_idle()
+
+    source_job, recovery_job = service.storage.list_jobs()
+    expected_signature = build_signature(stage="issue_request", job=source_job.id, issue=50)
+    matching_comments = github.find_comments_by_signature(
+        "acme/demo", 50, kind="issue", signature_fragment=expected_signature
+    )
+    assert source_job.status == "completed"
+    assert recovery_job.status == "completed"
+    assert [record["job"].stage for record in omx_runner.resumes] == ["issue_request_recovery"]
+    assert [record["job"].stage for record in omx_runner.launches] == ["issue_request"]
+    assert len(matching_comments) == 1
+    assert recovery_job.metadata["comment_recovery_resume_error"] == "resume raised after posting signature"
+    assert recovery_job.metadata["note"] == "side_effect_already_posted"
 
 
 def test_issue_request_recovery_does_not_fresh_launch_when_failed_resume_posted_signature(tmp_path: Path) -> None:
