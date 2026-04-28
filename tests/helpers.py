@@ -197,9 +197,7 @@ class FakeOmxRunner:
             omx_session_id=f"omx-{job.id}",
         )
 
-    def _post_side_effect(  # noqa: C901
-        self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None
-    ) -> None:
+    def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
         if job.stage == "issue_request":
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
             self.github.add_issue_signature(
