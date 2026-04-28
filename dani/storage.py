@@ -143,6 +143,7 @@ class JsonStorage:
         *,
         repo_full_name: str,
         stage: str | None = None,
+        job_id: str | None = None,
         issue_number: int | None = None,
         pr_number: int | None = None,
         require_omx_session_id: bool = False,
@@ -152,6 +153,8 @@ class JsonStorage:
             if session.repo_full_name != repo_full_name:
                 continue
             if stage is not None and session.stage != stage:
+                continue
+            if job_id is not None and session.job_id != job_id:
                 continue
             if issue_number is not None and session.issue_number != issue_number:
                 continue

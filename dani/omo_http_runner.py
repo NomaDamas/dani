@@ -28,7 +28,12 @@ from dani.opencode_http import (
 logger = logging.getLogger(__name__)
 
 ULTRAWORK_PROMPT_PREFIX = "ultrawork\n\n"
-PLANNING_STAGES = frozenset({"issue_request", "issue_followup"})
+COMMENT_ONLY_STAGES = frozenset({
+    "issue_request",
+    "issue_followup",
+    "issue_request_recovery",
+    "issue_followup_recovery",
+})
 DANI_OPENCODE_SERVER_URL_ENV = "DANI_OPENCODE_SERVER_URL"
 DANI_OPENCODE_PERMISSION_RESPONSE_ENV = "DANI_OPENCODE_PERMISSION_RESPONSE"
 SESSION_ID_PATTERN = re.compile(r"^ses_[A-Za-z0-9]+$")
@@ -207,7 +212,7 @@ class OmoHttpRunner:
     def _decorated_prompt(self, prompt: str, *, stage: str | None = None) -> str:
         if prompt.lstrip().lower().startswith("ultrawork"):
             return prompt
-        if stage in PLANNING_STAGES:
+        if stage in COMMENT_ONLY_STAGES:
             return prompt
         return f"{ULTRAWORK_PROMPT_PREFIX}{prompt}"
 

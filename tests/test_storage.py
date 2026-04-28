@@ -87,3 +87,49 @@ def test_storage_round_trips_runtime_metadata_and_filters_by_effective_runtime(t
     assert latest_omx.fallback_reason == "claude_weekly_limit"
     assert latest_omx.bridge_source_runtime == "omo"
     assert latest_omx.bridge_source_session_id == "ses_omo123"
+
+
+def test_find_latest_session_can_filter_by_source_job_id(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    repo = RepoConfig(full_name="acme/demo", local_path=str(tmp_path))
+    storage.register_repo(repo)
+    first_job = storage.create_job(JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=40))
+    second_job = storage.create_job(JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=40))
+    storage.create_session(
+        SessionRecord(
+            repo_full_name=repo.full_name,
+            stage="issue_request",
+            runtime_handle="runtime-first",
+            prompt_path=str(tmp_path / "prompt-first.txt"),
+            script_path=str(tmp_path / "run-first.sh"),
+            worktree_path=str(tmp_path),
+            job_id=first_job.id,
+            issue_number=40,
+            omx_session_id="omx-first",
+        )
+    )
+    storage.create_session(
+        SessionRecord(
+            repo_full_name=repo.full_name,
+            stage="issue_request",
+            runtime_handle="runtime-second",
+            prompt_path=str(tmp_path / "prompt-second.txt"),
+            script_path=str(tmp_path / "run-second.sh"),
+            worktree_path=str(tmp_path),
+            job_id=second_job.id,
+            issue_number=40,
+            omx_session_id="omx-second",
+        )
+    )
+
+    source_session = storage.find_latest_session(
+        repo_full_name=repo.full_name,
+        stage="issue_request",
+        issue_number=40,
+        job_id=first_job.id,
+    )
+
+    assert source_session is not None
+    assert source_session.job_id == first_job.id
+    assert source_session.omx_session_id == "omx-first"

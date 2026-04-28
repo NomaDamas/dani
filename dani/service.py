@@ -929,6 +929,7 @@ class DaniService:
         source_session = self.storage.find_latest_session(
             repo_full_name=job.repo_full_name,
             stage=job.stage,
+            job_id=job.id,
             issue_number=job.issue_number,
         )
         recovery_attempt = attempts + 1
