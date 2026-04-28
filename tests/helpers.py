@@ -190,7 +190,9 @@ class FakeOmxRunner:
             omx_session_id=f"omx-{job.id}",
         )
 
-    def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
+    def _post_side_effect(  # noqa: C901
+        self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None
+    ) -> None:
         if job.stage == "issue_request":
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
             self.github.add_issue_signature(
@@ -198,6 +200,8 @@ class FakeOmxRunner:
                 issue_number,
                 build_signature(stage="issue_request", job=job.id, issue=issue_number),
             )
+        elif job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
+            self._post_recovery_side_effect(repo_full_name, job)
         elif job.stage == "implementation":
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
             pr_number = int((signature or {}).get("pr", job.pr_number or 0))
@@ -238,6 +242,11 @@ class FakeOmxRunner:
                 job.pr_number or 0,
                 build_signature(stage="final_verdict", job=job.id, pr=job.pr_number or 0, verdict="APPROVE"),
             )
+
+    def _post_recovery_side_effect(self, repo_full_name: str, job: JobRecord) -> None:
+        expected_signature = job.metadata.get("expected_signature")
+        if isinstance(expected_signature, str) and expected_signature:
+            self.github.add_issue_signature(repo_full_name, job.issue_number or 0, expected_signature)
 
     def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
         if self.resume_error is not None:
