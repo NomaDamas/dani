@@ -83,6 +83,44 @@ class DaniService:
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
         self.session_bridge = session_bridge or OmoSessionBridge()
         self.queue_manager = RepoQueueManager(self._run_job)
+        self._rehydrate_pending_jobs()
+
+    def _rehydrate_pending_jobs(self) -> None:
+        """Submit durable pending jobs that survived a Dani process restart."""
+        for job in self.storage.list_jobs():
+            if job.status in {"queued", "retrying"}:
+                self.queue_manager.submit(job)
+                continue
+            if job.status == "launched":
+                repo = self.storage.get_repo(job.repo_full_name)
+                if repo is not None:
+                    with contextlib.suppress(Exception):
+                        self._verify_side_effect(repo, job)
+                        if job.stage in ISSUE_COMMENT_RECOVERY_STAGES:
+                            self._complete_comment_recovery(job)
+                        self.storage.update_job(
+                            job.id,
+                            status="completed",
+                            metadata={
+                                **job.metadata,
+                                "recovered_from_status": "launched",
+                                "recovered_session_id": job.session_id,
+                                "recovered_at": utc_now(),
+                                "note": "side_effect_already_posted",
+                            },
+                        )
+                        continue
+                recovered = self.storage.update_job(
+                    job.id,
+                    status="queued",
+                    metadata={
+                        **job.metadata,
+                        "recovered_from_status": "launched",
+                        "recovered_session_id": job.session_id,
+                        "recovered_at": utc_now(),
+                    },
+                )
+                self.queue_manager.submit(recovered)
 
     def register_repo(
         self, full_name: str, local_path: str, main_branch: str = "main", dev_branch: str = "dev"
@@ -494,7 +532,6 @@ class DaniService:
             )
         self.storage.update_job(
             job.id,
-            status="launched",
             session_id=session.id,
             metadata={**job.metadata, "effective_runtime": session.effective_runtime or initial_runtime},
         )
@@ -639,6 +676,15 @@ class DaniService:
             bridge_context=bridge_context,
         )
         self.storage.create_session(session)
+        self.storage.update_job(
+            job.id,
+            status="launched",
+            session_id=session.id,
+            metadata={**job.metadata, "effective_runtime": session.effective_runtime or runtime},
+        )
+        job.status = "launched"
+        job.session_id = session.id
+        job.metadata["effective_runtime"] = session.effective_runtime or runtime
         try:
             runner.wait(session.runtime_handle)
             self._verify_side_effect(repo, job)
@@ -1337,6 +1383,8 @@ class DaniService:
             return
         if job.stage == "final_verdict":
             self._verify_final_verdict_side_effect(repo, job)
+            return
+        raise RuntimeError("side-effect-verification-unsupported")
 
     def _build_issue_request_prompt(
         self,
