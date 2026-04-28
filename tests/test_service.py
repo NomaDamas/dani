@@ -3112,3 +3112,34 @@ def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Pat
     assert recovered_source.metadata["comment_recovery_job_id"] == recovery.id
     assert recovered_recovery is not None
     assert recovered_recovery.status == "completed"
+
+
+def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_timeout_seconds=5400)
+    storage = JsonStorage(config)
+    github = FakeGitHubCLI()
+    omx_runner = FakeOmxRunner(github)
+    service = DaniService(
+        config,
+        storage=storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, omx_runner),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    service.register_repo("acme/demo", str(tmp_path))
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=5,
+            actor_login="alice",
+            payload={},
+            title="Configurable timeout",
+            body="Please handle this.",
+        )
+    )
+    service.wait_for_idle()
+
+    assert omx_runner.wait_calls[-1]["timeout_seconds"] == 5400

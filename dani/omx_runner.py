@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from dani.agent_runner import ManagedProcess
 from dani.errors import check_rollout_missing_error, check_transient_capacity_error
-from dani.models import JobRecord, SessionRecord
+from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
 
 __all__ = ["ManagedProcess", "OmxRunner"]
 
@@ -131,7 +131,9 @@ class OmxRunner:
             f'exec omx exec resume {quoted_session_id} --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
         )
 
-    def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+    def wait(
+        self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
+    ) -> None:
         del poll_interval
         with self._lock:
             entry = self._processes.get(runtime_handle)

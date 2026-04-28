@@ -34,6 +34,19 @@ Optional environment variables:
 - `DANI_AGENT_RUNTIME` — selects the agent backend. Accepted values:
   - `omx` / `oh-my-codex` / `codex` (default)
   - `omo` / `oh-my-openagents` / `oh-my-openagent` / `opencode`
+- `DANI_AGENT_TIMEOUT_SECONDS` — overrides the per-job agent wait timeout in seconds.
+
+Optional config file (`~/.dani/config.json` by default, or `<data-dir>/config.json`):
+
+```json
+{
+  "agent_runtime": "omo",
+  "agent_timeout_seconds": 3600
+}
+```
+
+`agent_timeout_seconds` defaults to `3600`. The environment variable
+`DANI_AGENT_TIMEOUT_SECONDS` takes precedence over the config file when set.
 
 When `DANI_AGENT_RUNTIME=omo` is selected, dani automatically prefixes every
 opencode prompt with the `ultrawork` keyword so oh-my-openagents' ultrawork

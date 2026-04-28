@@ -14,7 +14,7 @@ from dani.errors import (
     check_opencode_session_missing_error,
     check_transient_capacity_error,
 )
-from dani.models import JobRecord, SessionRecord
+from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
 from dani.opencode_http import (
     OPENCODE_BIN_DEFAULT,
     PERMISSION_RESPONSE_DEFAULT,
@@ -154,7 +154,9 @@ class OmoHttpRunner:
             stderr_path=str(event_log_path),
         )
 
-    def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
+    def wait(
+        self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
+    ) -> None:
         del poll_interval
         with self._lock:
             task = self._tasks.get(runtime_handle)

@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
-from dani.models import DaniConfig
+from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, DaniConfig
 from dani.server import create_app
 from dani.service import DaniService
 
@@ -22,15 +22,53 @@ MAIN_BRANCH_OPTION = typer.Option("main", help="Main branch name.")
 DEV_BRANCH_OPTION = typer.Option("dev", help="Development branch name.")
 
 
+def _load_config_file(data_dir: Path) -> dict[str, object]:
+    config_path = data_dir / "config.json"
+    if not config_path.exists():
+        return {}
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid dani config file {config_path}: {exc}"
+        raise typer.BadParameter(msg) from exc
+    if not isinstance(payload, dict):
+        msg = f"Invalid dani config file {config_path}: top-level JSON value must be an object"
+        raise typer.BadParameter(msg)
+    return payload
+
+
+def _parse_positive_float(value: object, *, name: str) -> float:
+    try:
+        parsed = float(str(value))
+    except (TypeError, ValueError) as exc:
+        msg = f"{name} must be a number of seconds"
+        raise typer.BadParameter(msg) from exc
+    if parsed <= 0:
+        msg = f"{name} must be greater than 0"
+        raise typer.BadParameter(msg)
+    return parsed
+
+
+def _resolve_agent_timeout_seconds(config_payload: dict[str, object]) -> float:
+    value = config_payload.get("agent_timeout_seconds", DEFAULT_AGENT_TIMEOUT_SECONDS)
+    env_value = os.environ.get("DANI_AGENT_TIMEOUT_SECONDS")
+    if env_value:
+        value = env_value
+    return _parse_positive_float(value, name="agent_timeout_seconds")
+
+
 def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> DaniConfig:
+    config_payload = _load_config_file(data_dir)
     secret = os.environ.get("DANI_WEBHOOK_SECRET", "")
-    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME", "omx")
+    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "omx"))
+    agent_timeout_seconds = _resolve_agent_timeout_seconds(config_payload)
     return DaniConfig(
         data_dir=data_dir,
         webhook_secret=secret,
         host=host,
         port=port,
         agent_runtime=agent_runtime,
+        agent_timeout_seconds=agent_timeout_seconds,
     )
 
 

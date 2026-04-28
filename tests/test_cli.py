@@ -73,3 +73,25 @@ def test_restart_issue_invokes_service_waits_for_idle_and_prints_job(tmp_path: P
     assert payload["id"] == "job-123"
     assert payload["stage"] == "issue_request"
     assert payload["issue_number"] == 41
+
+
+def test_build_config_reads_agent_timeout_from_config_file(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"agent_timeout_seconds": 7200}), encoding="utf-8")
+    monkeypatch.delenv("DANI_AGENT_TIMEOUT_SECONDS", raising=False)
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.agent_timeout_seconds == 7200
+
+
+def test_build_config_agent_timeout_env_overrides_config_file(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"agent_timeout_seconds": 7200}), encoding="utf-8")
+    monkeypatch.setenv("DANI_AGENT_TIMEOUT_SECONDS", "5400")
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.agent_timeout_seconds == 5400

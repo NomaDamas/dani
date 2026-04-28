@@ -3,7 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, TextIO, cast, runtime_checkable
 
-from dani.models import JobRecord, SessionRecord
+from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
+
+RUNTIME_ALIASES: dict[str, str] = {
+    "omx": "omx",
+    "oh-my-codex": "omx",
+    "codex": "omx",
+    "omo": "omo",
+    "oh-my-openagents": "omo",
+    "oh-my-openagent": "omo",
+    "opencode": "omo",
+}
 
 RUNTIME_ALIASES: dict[str, str] = {
     "omx": "omx",
@@ -53,7 +63,7 @@ class AgentRunner(Protocol):
         runtime_handle: str,
         *,
         poll_interval: float = 0.5,
-        timeout_seconds: float = 1800,
+        timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS,
     ) -> None: ...
 
     def close_session(self, runtime_handle: str) -> None: ...
