@@ -9,6 +9,7 @@ from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
 from dani.models import RUNTIME_OMO, RUNTIME_OMX, DaniConfig, JobRecord, NormalizedEvent, SessionRecord
 from dani.omx_runner import OmxRunner
+from dani.prompts import NON_INTERACTIVE_GUARD
 from dani.service import DaniService
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
@@ -408,6 +409,43 @@ def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_
     assert "$ralph" in omx_prompt
     assert "$ralph" not in omo_prompt
     assert "ultrawork" in omo_prompt
+
+
+def test_service_bridge_context_keeps_non_interactive_guard_first(tmp_path: Path) -> None:
+    service, _, _, _ = make_omo_preferred_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
+
+    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO, bridge_prompt="IMPORTED OMO CONTEXT")
+
+    assert prompt.startswith(NON_INTERACTIVE_GUARD)
+    assert prompt.index("IMPORTED OMO CONTEXT") > prompt.index("DO NOT call the `question` tool")
+    assert prompt.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
+
+
+@pytest.mark.parametrize("stage", ["issue_request_recovery", "issue_followup_recovery"])
+def test_issue_comment_recovery_prompt_includes_non_interactive_guard_first(tmp_path: Path, stage: str) -> None:
+    service, _, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(
+        repo_full_name="acme/demo",
+        stage=stage,
+        issue_number=41,
+        metadata={
+            "source_job_id": "source-job",
+            "expected_signature": "<!-- dani:stage=issue_request;job=source-job;issue=41 -->",
+            "original_error": "missing comment",
+        },
+    )
+
+    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+
+    assert prompt.startswith(NON_INTERACTIVE_GUARD)
+    assert "DO NOT call the `question` tool" in prompt
+    assert "Recovery task for GitHub issue #41" in prompt
+    assert prompt.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
 
 
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 import pytest
 
-from dani.prompts import render_prompt
+from dani.prompts import TEMPLATES, render_prompt
 
 
 def test_implementation_prompt_keeps_ralph_literal() -> None:
@@ -535,25 +535,25 @@ def _dev_sync_conflict_context() -> dict[str, object]:
     }
 
 
-_NON_INTERACTIVE_TEMPLATES: tuple[tuple[str, dict[str, object]], ...] = (
-    ("issue_request", _issue_request_context()),
-    ("issue_followup", _issue_followup_context()),
-    ("implementation", _implementation_context()),
-    ("review_round", _review_round_context()),
-    ("merge_conflict_resolution", _merge_conflict_resolution_context()),
-    ("final_verdict", _final_verdict_context()),
-    ("dev_sync_conflict", _dev_sync_conflict_context()),
-)
+_NON_INTERACTIVE_TEMPLATE_CONTEXTS: dict[str, dict[str, object]] = {
+    "issue_request": _issue_request_context(),
+    "issue_followup": _issue_followup_context(),
+    "implementation": _implementation_context(),
+    "review_round": _review_round_context(),
+    "merge_conflict_resolution": _merge_conflict_resolution_context(),
+    "final_verdict": _final_verdict_context(),
+    "dev_sync_conflict": _dev_sync_conflict_context(),
+}
 
 
-@pytest.mark.parametrize("template_name,context", _NON_INTERACTIVE_TEMPLATES)
+@pytest.mark.parametrize("template_name", sorted(TEMPLATES))
 @pytest.mark.parametrize("runtime", ["omx", "omo"])
 def test_every_template_prepends_non_interactive_guard(
     template_name: str,
-    context: dict[str, object],
     runtime: str,
 ) -> None:
-    prompt = render_prompt(template_name, context, runtime=runtime)
+    assert set(_NON_INTERACTIVE_TEMPLATE_CONTEXTS) == set(TEMPLATES)
+    prompt = render_prompt(template_name, _NON_INTERACTIVE_TEMPLATE_CONTEXTS[template_name], runtime=runtime)
 
     assert prompt.startswith("NON-INTERACTIVE AUTOMATION CONTRACT"), (
         f"{template_name}/{runtime}: guard must be the first thing the agent reads"

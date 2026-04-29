@@ -266,6 +266,13 @@ _RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+def ensure_non_interactive_guard(prompt: str) -> str:
+    """Return *prompt* with the non-interactive guard at the very top, once."""
+    if prompt.startswith(NON_INTERACTIVE_GUARD):
+        return prompt
+    return f"{NON_INTERACTIVE_GUARD}\n{prompt}"
+
+
 def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "omx") -> str:
     template = TEMPLATES[template_name]
     context = dict(context)
@@ -282,4 +289,4 @@ def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str =
     if substitutions:
         for needle, replacement in substitutions:
             rendered = rendered.replace(needle, replacement)
-    return f"{NON_INTERACTIVE_GUARD}\n{rendered}"
+    return ensure_non_interactive_guard(rendered)
