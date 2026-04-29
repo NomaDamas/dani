@@ -56,7 +56,7 @@ Checklist:
 - [ ] Why this issue may not be needed
 - [ ] Expected Outcome
 - [ ] Evidence-based implementation plan (phrased as instructions for the implementation agent)
-- [ ] Open questions for the human (if any) — they must answer in a follow-up comment before /approve
+- [ ] Assumptions / human decisions to resolve asynchronously before /approve (if any)
 - [ ] Reminder that implementation starts only after a human comment containing "/approve"
 - [ ] Agent Signature
 
@@ -97,7 +97,7 @@ Continue the existing issue discussion instead of restarting the analysis from s
 Write exactly one GitHub issue comment that addresses the new follow-up. The comment must:
 - Answer or clarify the user's follow-up directly.
 - Update the implementation plan if the follow-up changes scope/approach.
-- Note any remaining open questions the human must resolve before "/approve".
+- Note any assumptions / human decisions to resolve asynchronously before "/approve".
 - Remind the human that implementation starts only after a comment containing "/approve".
 - Include this exact signature on its own line:
 $signature
@@ -271,6 +271,13 @@ def ensure_non_interactive_guard(prompt: str) -> str:
     if prompt.startswith(NON_INTERACTIVE_GUARD):
         return prompt
     return f"{NON_INTERACTIVE_GUARD}\n{prompt}"
+
+
+def split_non_interactive_guard(prompt: str) -> str:
+    """Return the prompt body after the non-interactive guard, if present."""
+    if not prompt.startswith(NON_INTERACTIVE_GUARD):
+        return prompt
+    return prompt.removeprefix(NON_INTERACTIVE_GUARD).lstrip("\n")
 
 
 def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "omx") -> str:

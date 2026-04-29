@@ -1,6 +1,6 @@
 import pytest
 
-from dani.prompts import TEMPLATES, render_prompt
+from dani.prompts import NON_INTERACTIVE_GUARD, TEMPLATES, render_prompt, split_non_interactive_guard
 
 
 def test_implementation_prompt_keeps_ralph_literal() -> None:
@@ -286,10 +286,11 @@ def test_issue_request_prompt_forbids_self_handoff_promises() -> None:
     assert "does not inherit your reasoning trace" in prompt
 
 
-def test_issue_request_prompt_checklist_mentions_approve_gate_and_open_questions() -> None:
+def test_issue_request_prompt_checklist_mentions_approve_gate_and_async_decisions() -> None:
     prompt = render_prompt("issue_request", _issue_request_context())
 
-    assert "Open questions for the human" in prompt
+    assert "Assumptions / human decisions to resolve asynchronously before /approve" in prompt
+    assert "Open questions for the human" not in prompt
     assert 'implementation starts only after a human comment containing "/approve"' in prompt
 
 
@@ -298,6 +299,13 @@ def test_issue_followup_prompt_declares_planning_only_role() -> None:
 
     assert "PLANNING AGENT" in prompt
     assert "DO NOT write code" in prompt
+
+
+def test_issue_followup_prompt_mentions_async_decisions_not_open_questions() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context())
+
+    assert 'assumptions / human decisions to resolve asynchronously before "/approve"' in prompt
+    assert "remaining open questions" not in prompt
     assert "/approve" in prompt
     assert "NEW, SEPARATE agent session" in prompt
 
@@ -544,6 +552,18 @@ _NON_INTERACTIVE_TEMPLATE_CONTEXTS: dict[str, dict[str, object]] = {
     "final_verdict": _final_verdict_context(),
     "dev_sync_conflict": _dev_sync_conflict_context(),
 }
+
+
+def test_split_non_interactive_guard_returns_body_without_raw_string_slicing() -> None:
+    prompt = f"{NON_INTERACTIVE_GUARD}\nPrompt body"
+
+    body = split_non_interactive_guard(prompt)
+
+    assert body == "Prompt body"
+
+
+def test_split_non_interactive_guard_accepts_unguarded_prompt() -> None:
+    assert split_non_interactive_guard("Prompt body") == "Prompt body"
 
 
 @pytest.mark.parametrize("template_name", sorted(TEMPLATES))

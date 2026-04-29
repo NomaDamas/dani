@@ -29,7 +29,7 @@ from dani.models import (
     effective_session_runtime,
     utc_now,
 )
-from dani.prompts import NON_INTERACTIVE_GUARD, ensure_non_interactive_guard, render_prompt
+from dani.prompts import NON_INTERACTIVE_GUARD, ensure_non_interactive_guard, render_prompt, split_non_interactive_guard
 from dani.queue import RepoQueueManager
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
@@ -1327,7 +1327,7 @@ class DaniService:
             "Use the imported OMO context above only as bounded background context. "
             "This is not a native resume; continue from it conservatively."
         )
-        prompt_body = guarded_prompt[len(NON_INTERACTIVE_GUARD) :].lstrip("\n")
+        prompt_body = split_non_interactive_guard(guarded_prompt)
         return f"{NON_INTERACTIVE_GUARD}\n{bridge_block}\n\n{prompt_body}"
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
