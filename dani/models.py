@@ -119,7 +119,6 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
-    external_review_limit: int = 10
     agent_runtime: str = "omx"
     agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
 

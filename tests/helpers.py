@@ -54,6 +54,8 @@ class FakeGitHubCLI:
             "state": "open",
             "head": {"ref": f"Feature/#{pr_number}"},
             "base": {"ref": "dev"},
+            "user": {"login": repo_full_name.split("/", 1)[0]},
+            "author_association": "OWNER",
         }
 
     def get_user(self, login: str) -> dict[str, Any]:
@@ -120,6 +122,8 @@ class FakeGitHubCLI:
         title: str | None = None,
         head_branch: str | None = None,
         base_branch: str = "dev",
+        user_login: str | None = None,
+        author_association: str = "OWNER",
     ) -> None:
         self.prs.setdefault(repo_full_name, []).append({
             "number": pr_number,
@@ -128,6 +132,8 @@ class FakeGitHubCLI:
             "state": "open",
             "head": {"ref": head_branch or f"Feature/#{pr_number}"},
             "base": {"ref": base_branch},
+            "user": {"login": user_login or repo_full_name.split("/", 1)[0]},
+            "author_association": author_association,
         })
 
     def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
@@ -191,9 +197,7 @@ class FakeOmxRunner:
             omx_session_id=f"omx-{job.id}",
         )
 
-    def _post_side_effect(  # noqa: C901
-        self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None
-    ) -> None:
+    def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
         if job.stage == "issue_request":
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
             self.github.add_issue_signature(
@@ -229,13 +233,6 @@ class FakeOmxRunner:
                 repo_full_name,
                 pr_number,
                 build_signature(stage="merge_conflict_resolution", job=job.id, pr=pr_number),
-            )
-        elif job.stage == "human_escalation":
-            pr_number = int((signature or {}).get("pr", job.pr_number or 0))
-            self.github.add_pr_signature(
-                repo_full_name,
-                pr_number,
-                build_signature(stage="human_escalation", job=job.id, pr=pr_number),
             )
         elif job.stage != "dev_sync":
             self.github.add_pr_signature(

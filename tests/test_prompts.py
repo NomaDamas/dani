@@ -464,23 +464,3 @@ def test_merge_conflict_resolution_prompt_requires_recheck_without_direct_merge(
     assert "Do not merge the PR yourself" in prompt
     assert "stage=merge_conflict_resolution" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <merge-conflict-comment.md>" in prompt
-
-
-def test_human_escalation_prompt_mentions_review_limit_and_signature() -> None:
-    prompt = render_prompt(
-        "human_escalation",
-        {
-            "repo": "acme/demo",
-            "pr_number": 5,
-            "pr_title": "Feature",
-            "pr_body": "Body",
-            "discussion": "history",
-            "review_limit": 10,
-            "signature": "<!-- dani:stage=human_escalation;job=abc;pr=5 -->",
-        },
-    )
-
-    assert "10" in prompt
-    assert "human maintainer" in prompt.lower()
-    assert "gh pr comment 5 --repo acme/demo --body-file <human-escalation.md>" in prompt
-    assert "stage=human_escalation" in prompt

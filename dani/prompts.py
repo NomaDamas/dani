@@ -209,28 +209,6 @@ gh pr comment $pr_number --repo $repo --body-file <final-verdict.md>
 After posting the PR comment, exit.
         """.strip()
     ),
-    "human_escalation": Template(
-        """
-You are escalating PR #$pr_number in $repo to a human maintainer.
-Review limit reached: $review_limit
-PR title: $pr_title
-PR body:
-$pr_body
-
-Recent review history:
-$discussion
-
-Leave exactly one GitHub PR comment that:
-- [ ] States automated review stopped after $review_limit review passes
-- [ ] Asks a human maintainer to take over triage / scope / merge judgment
-- [ ] Includes this exact signature: $signature
-
-Post it with gh:
-gh pr comment $pr_number --repo $repo --body-file <human-escalation.md>
-
-After posting the PR comment, exit.
-        """.strip()
-    ),
     "dev_sync_conflict": Template(
         """
 You are operating inside repository: $repo
