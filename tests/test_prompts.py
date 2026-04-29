@@ -1,3 +1,5 @@
+import pytest
+
 from dani.prompts import render_prompt
 
 
@@ -464,3 +466,100 @@ def test_merge_conflict_resolution_prompt_requires_recheck_without_direct_merge(
     assert "Do not merge the PR yourself" in prompt
     assert "stage=merge_conflict_resolution" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <merge-conflict-comment.md>" in prompt
+
+
+def _final_verdict_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "pr_number": 5,
+        "pr_title": "Feature",
+        "pr_body": "Body",
+        "discussion": "history",
+        "approve_signature": "<!-- dani:stage=final_verdict;job=abc;pr=5;verdict=APPROVE -->",
+        "reject_signature": "<!-- dani:stage=final_verdict;job=abc;pr=5;verdict=REJECT -->",
+    }
+
+
+def _review_round_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "pr_number": 5,
+        "pr_title": "Feature",
+        "pr_body": "Body",
+        "discussion": "history",
+        "round_number": 2,
+        "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
+    }
+
+
+def _implementation_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "local_path": "workspace/demo",
+        "issue_number": 7,
+        "issue_title": "Need a bot",
+        "issue_body": "Implement it",
+        "discussion": "approved",
+        "pr_context": "",
+        "pr_number": "",
+        "dev_branch": "dev",
+        "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
+        "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
+    }
+
+
+def _merge_conflict_resolution_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "local_path": "workspace/demo",
+        "issue_number": 7,
+        "pr_number": 5,
+        "pr_title": "Feature",
+        "pr_body": "Body",
+        "head_branch": "Feature/#7",
+        "base_branch": "dev",
+        "conflict_reason": "merge conflict with base branch",
+        "signature": "<!-- dani:stage=merge_conflict_resolution;job=abc;pr=5 -->",
+    }
+
+
+def _dev_sync_conflict_context() -> dict[str, object]:
+    return {
+        "repo": "acme/demo",
+        "local_path": "workspace/demo",
+        "main_branch": "main",
+        "main_sha": "abc123",
+        "dev_branch": "dev",
+        "temp_branch": "dani/dev-sync/abc123",
+        "commit_message": "Merge main into dev",
+    }
+
+
+_NON_INTERACTIVE_TEMPLATES: tuple[tuple[str, dict[str, object]], ...] = (
+    ("issue_request", _issue_request_context()),
+    ("issue_followup", _issue_followup_context()),
+    ("implementation", _implementation_context()),
+    ("review_round", _review_round_context()),
+    ("merge_conflict_resolution", _merge_conflict_resolution_context()),
+    ("final_verdict", _final_verdict_context()),
+    ("dev_sync_conflict", _dev_sync_conflict_context()),
+)
+
+
+@pytest.mark.parametrize("template_name,context", _NON_INTERACTIVE_TEMPLATES)
+@pytest.mark.parametrize("runtime", ["omx", "omo"])
+def test_every_template_prepends_non_interactive_guard(
+    template_name: str,
+    context: dict[str, object],
+    runtime: str,
+) -> None:
+    prompt = render_prompt(template_name, context, runtime=runtime)
+
+    assert prompt.startswith("NON-INTERACTIVE AUTOMATION CONTRACT"), (
+        f"{template_name}/{runtime}: guard must be the first thing the agent reads"
+    )
+    assert "DO NOT call the `question` tool" in prompt, (
+        f"{template_name}/{runtime}: must explicitly forbid the question tool by name"
+    )
+    assert "DO NOT ask the user for clarification" in prompt
+    assert "most conservative reasonable interpretation" in prompt
