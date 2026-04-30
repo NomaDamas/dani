@@ -5,6 +5,23 @@ from typing import Any
 
 from dani.signatures import build_signature
 
+# Non-interactive automation guard.
+#
+# dani drives agents in a non-interactive webhook-triggered loop. There is no
+# human attached to the session: any tool that waits for human input (notably
+# opencode's `question` tool) will block the session forever, eventually
+# tripping `agent_timeout_seconds` and failing the job. omx (codex) does not
+# expose `question` today, but the guard is run-time-agnostic so future omx
+# tool surface changes can't reintroduce the same stall.
+NON_INTERACTIVE_GUARD = (
+    "NON-INTERACTIVE AUTOMATION CONTRACT (read first):\n"
+    "- You are running inside dani's non-interactive automation loop. There is NO human attached to this session.\n"
+    "- DO NOT call the `question` tool, DO NOT ask the user for clarification, DO NOT request approval mid-task. Any tool that waits for a human reply will hang the session until it is force-killed by timeout, and the job will be marked failed.\n"
+    "- If scope or intent is ambiguous, pick the most conservative reasonable interpretation, state your assumption explicitly in the comment/PR you post, and proceed. Do not stop to ask.\n"
+    "- If a blocker is genuinely unresolvable (missing credential, destructive action you must not take, etc.), document it inline in the comment/PR body you post and exit normally. Do not call `question` to surface it.\n"
+)
+
+
 TEMPLATES = {
     "issue_request": Template(
         """
@@ -265,4 +282,4 @@ def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str =
     if substitutions:
         for needle, replacement in substitutions:
             rendered = rendered.replace(needle, replacement)
-    return rendered
+    return f"{NON_INTERACTIVE_GUARD}\n{rendered}"
