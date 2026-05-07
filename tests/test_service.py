@@ -3182,3 +3182,401 @@ def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert omx_runner.wait_calls[-1]["timeout_seconds"] == 5400
+
+
+def test_issue_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=58,
+            actor_login="human",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="closed",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert omx_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
+
+
+def test_issue_opened_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 58)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=58,
+            actor_login="h",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert omx_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
+
+
+def test_issue_reopened_action_is_no_op(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="reopened",
+            number=58,
+            actor_login="h",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_reopened_no_op"}
+    assert omx_runner.launches == []
+
+
+def test_approve_on_closed_issue_does_not_queue_implementation(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=12,
+            actor_login="h",
+            payload={"issue": {"body": "x"}},
+            body="/approve",
+            title="t",
+            issue_state="closed",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert omx_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=12) == []
+
+
+def test_approve_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 12)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=12,
+            actor_login="h",
+            payload={"issue": {"body": "x"}},
+            body="/approve",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert omx_runner.launches == []
+
+
+def test_second_approve_for_same_issue_is_deduplicated(tmp_path: Path) -> None:
+    service, _, _omx_runner = make_service(tmp_path)
+    base_event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=13,
+        actor_login="h",
+        payload={"issue": {"body": "x"}},
+        body="/approve",
+        title="t",
+        issue_state="open",
+    )
+
+    first = service.handle_event(base_event)
+    service.wait_for_idle()
+    second = service.handle_event(base_event)
+    service.wait_for_idle()
+
+    assert first["status"] == "queued"
+    assert first["stage"] == "implementation"
+    assert second == {"status": "ignored", "reason": "duplicate_implementation"}
+    impl_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=13)
+    assert len(impl_jobs) == 1
+
+
+def test_followup_from_dani_bot_login_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.config.bot_login = "danibot[bot]"
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=21,
+            actor_login="danibot[bot]",
+            payload={"issue": {"body": "x"}},
+            body="dani report",
+            title="t",
+            issue_state="open",
+            actor_type="Bot",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "self_authored_comment"}
+    assert omx_runner.launches == []
+    assert omx_runner.resumes == []
+
+
+def test_followup_with_actor_type_bot_is_ignored_when_bot_login_unset(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    assert service.config.bot_login is None
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=22,
+            actor_login="some-bot",
+            payload={"issue": {"body": "x"}},
+            body="comment",
+            title="t",
+            issue_state="open",
+            actor_type="Bot",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "self_authored_comment"}
+    assert omx_runner.launches == []
+
+
+def test_followup_short_circuits_after_max_rounds(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    for _ in range(service.config.max_issue_followups):
+        service.storage.create_job(
+            JobRecord(
+                repo_full_name=repo.full_name,
+                stage="issue_followup",
+                issue_number=23,
+                status="completed",
+            )
+        )
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=23,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="more?",
+            title="t",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "max_followups_reached"}
+    assert omx_runner.launches == []
+    assert omx_runner.resumes == []
+
+
+def test_followup_on_closed_issue_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=24,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="hello",
+            title="t",
+            issue_state="closed",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert omx_runner.launches == []
+
+
+def test_followup_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 25)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=25,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="hello",
+            title="t",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert omx_runner.launches == []
+
+
+def test_pull_request_opened_with_merged_state_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    event = make_pr_event(pr_number=88, action="synchronize", body="Implements #21")
+    event.pr_state = "closed"
+    event.pr_merged = True
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_merged"}
+    assert omx_runner.launches == []
+
+
+def test_pull_request_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    event = make_pr_event(pr_number=89, action="synchronize", body="Implements #22")
+    event.pr_state = "closed"
+    event.pr_merged = False
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_not_open"}
+    assert omx_runner.launches == []
+
+
+def test_pull_request_opened_after_terminal_pr_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+    service.storage.mark_terminal_pr("acme/demo", 90, merged=True)
+    event = make_pr_event(pr_number=90, action="opened", body="Implements #23")
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_terminal"}
+    assert omx_runner.launches == []
+
+
+def test_pull_request_closed_merged_marks_terminal_pr_and_issue(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=70,
+            actor_login="danibot[bot]",
+            payload={},
+            body="Implements #58",
+            title="Feature/#70",
+            base_branch="dev",
+            head_branch="feature/#70",
+            commit_sha="x",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=True,
+            actor_type="Bot",
+        )
+    )
+
+    assert result == {"status": "marked_terminal", "pr_number": 70, "merged": True}
+    assert service.storage.is_terminal_pr("acme/demo", 70) is True
+    assert service.storage.is_terminal_issue("acme/demo", 58) is True
+
+
+def test_pull_request_closed_unmerged_marks_only_pr(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=71,
+            actor_login="h",
+            payload={},
+            body="Implements #59",
+            title="Feature/#71",
+            base_branch="dev",
+            head_branch="feature/#71",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=False,
+        )
+    )
+
+    assert result == {"status": "marked_terminal", "pr_number": 71, "merged": False}
+    assert service.storage.is_terminal_pr("acme/demo", 71) is True
+    assert service.storage.is_terminal_issue("acme/demo", 59) is False
+
+
+def test_followup_after_pr_merged_is_short_circuited_end_to_end(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=70,
+            actor_login="danibot[bot]",
+            payload={},
+            body="Implements #58",
+            title="Feature/#70",
+            base_branch="dev",
+            head_branch="feature/#70",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=True,
+            actor_type="Bot",
+        )
+    )
+
+    followup_result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=58,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="anything else?",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert followup_result == {"status": "ignored", "reason": "issue_terminal"}
+    assert omx_runner.launches == []
+    assert omx_runner.resumes == []

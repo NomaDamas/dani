@@ -95,3 +95,68 @@ def test_build_config_agent_timeout_env_overrides_config_file(tmp_path: Path, mo
     config = cli_module.build_config(data_dir)
 
     assert config.agent_timeout_seconds == 5400
+
+
+def test_build_config_defaults_for_bot_login_and_max_issue_followups(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    monkeypatch.delenv("DANI_BOT_LOGIN", raising=False)
+    monkeypatch.delenv("DANI_MAX_ISSUE_FOLLOWUPS", raising=False)
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.bot_login is None
+    assert config.max_issue_followups == 3
+
+
+def test_build_config_reads_bot_login_from_env(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    monkeypatch.setenv("DANI_BOT_LOGIN", "danibot[bot]")
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.bot_login == "danibot[bot]"
+
+
+def test_build_config_reads_bot_login_from_config_file(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"bot_login": "dani-machine"}), encoding="utf-8")
+    monkeypatch.delenv("DANI_BOT_LOGIN", raising=False)
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.bot_login == "dani-machine"
+
+
+def test_build_config_bot_login_env_overrides_config_file(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"bot_login": "from-file"}), encoding="utf-8")
+    monkeypatch.setenv("DANI_BOT_LOGIN", "from-env")
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.bot_login == "from-env"
+
+
+def test_build_config_reads_max_issue_followups_from_env(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    monkeypatch.setenv("DANI_MAX_ISSUE_FOLLOWUPS", "5")
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.max_issue_followups == 5
+
+
+def test_build_config_reads_max_issue_followups_from_config_file(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    data_dir.mkdir()
+    (data_dir / "config.json").write_text(json.dumps({"max_issue_followups": 7}), encoding="utf-8")
+    monkeypatch.delenv("DANI_MAX_ISSUE_FOLLOWUPS", raising=False)
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.max_issue_followups == 7
