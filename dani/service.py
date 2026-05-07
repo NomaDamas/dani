@@ -207,19 +207,62 @@ class DaniService:
         if event.kind == "branch_push":
             return self._queue_dev_sync(repo, event)
 
+        if event.kind == "pull_request_closed":
+            return self._handle_pull_request_closed(repo, event)
+
         if event.kind == "issue_opened":
-            return self._queue_issue_request(repo, event)
+            return self._dispatch_issue_opened(repo, event)
 
         if event.kind == "issue_comment" and self._is_approve_comment(event.body):
-            return self._queue_implementation(repo, event)
+            return self._dispatch_approve_comment(repo, event)
 
         if event.kind == "issue_comment":
-            return self._queue_issue_followup(repo, event)
+            return self._dispatch_issue_followup_comment(repo, event)
 
         if event.kind == "pull_request_opened":
-            return self._queue_pull_request_review(repo, event, signature)
+            return self._dispatch_pull_request_opened(repo, event, signature)
 
         return {"status": "ignored", "reason": "unsupported_event"}
+
+    def _dispatch_issue_opened(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.action == "reopened":
+            return {"status": "ignored", "reason": "issue_reopened_no_op"}
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        return self._queue_issue_request(repo, event)
+
+    def _dispatch_approve_comment(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        if self._has_existing_implementation_job(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "duplicate_implementation"}
+        return self._queue_implementation(repo, event)
+
+    def _dispatch_issue_followup_comment(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        if self._is_dani_self_authored(event):
+            return {"status": "ignored", "reason": "self_authored_comment"}
+        if self._completed_followup_count(repo.full_name, event.number) >= self.config.max_issue_followups:
+            return {"status": "ignored", "reason": "max_followups_reached"}
+        return self._queue_issue_followup(repo, event)
+
+    def _dispatch_pull_request_opened(
+        self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
+    ) -> dict[str, Any]:
+        if event.pr_merged is True:
+            return {"status": "ignored", "reason": "pr_merged"}
+        if event.pr_state == "closed":
+            return {"status": "ignored", "reason": "pr_not_open"}
+        if self.storage.is_terminal_pr(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "pr_terminal"}
+        return self._queue_pull_request_review(repo, event, signature)
 
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
@@ -1752,6 +1795,38 @@ class DaniService:
             if job.status in {"queued", "launched", "completed"}:
                 return True
         return False
+
+    def _has_existing_implementation_job(self, repo_full_name: str, issue_number: int) -> bool:
+        for job in self.storage.find_jobs(
+            repo_full_name=repo_full_name, stage="implementation", issue_number=issue_number
+        ):
+            if job.status in {"queued", "launched", "running", "completed"}:
+                return True
+        return False
+
+    def _completed_followup_count(self, repo_full_name: str, issue_number: int) -> int:
+        count = 0
+        for job in self.storage.find_jobs(
+            repo_full_name=repo_full_name, stage="issue_followup", issue_number=issue_number
+        ):
+            if job.status in {"queued", "launched", "running", "completed"}:
+                count += 1
+        return count
+
+    def _is_dani_self_authored(self, event: NormalizedEvent) -> bool:
+        configured_login = self.config.bot_login
+        if configured_login:
+            return event.actor_login == configured_login
+        return event.actor_type == "Bot"
+
+    def _handle_pull_request_closed(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        merged = bool(event.pr_merged)
+        self.storage.mark_terminal_pr(repo.full_name, event.number, merged=merged)
+        if merged:
+            issue_number = self._extract_issue_number(event.body)
+            if issue_number is not None:
+                self.storage.mark_terminal_issue(repo.full_name, issue_number)
+        return {"status": "marked_terminal", "pr_number": event.number, "merged": merged}
 
     def _queue_implementation(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         job = self._enqueue_job(

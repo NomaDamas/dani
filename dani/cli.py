@@ -7,7 +7,7 @@ from pathlib import Path
 import typer
 import uvicorn
 
-from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, DaniConfig
+from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, DEFAULT_MAX_ISSUE_FOLLOWUPS, DaniConfig
 from dani.server import create_app
 from dani.service import DaniService
 
@@ -57,11 +57,44 @@ def _resolve_agent_timeout_seconds(config_payload: dict[str, object]) -> float:
     return _parse_positive_float(value, name="agent_timeout_seconds")
 
 
+def _resolve_bot_login(config_payload: dict[str, object]) -> str | None:
+    env_value = os.environ.get("DANI_BOT_LOGIN")
+    if env_value is not None and env_value != "":
+        return env_value
+    raw = config_payload.get("bot_login")
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _parse_non_negative_int(value: object, *, name: str) -> int:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError) as exc:
+        msg = f"{name} must be an integer"
+        raise typer.BadParameter(msg) from exc
+    if parsed < 0:
+        msg = f"{name} must be greater than or equal to 0"
+        raise typer.BadParameter(msg)
+    return parsed
+
+
+def _resolve_max_issue_followups(config_payload: dict[str, object]) -> int:
+    value: object = config_payload.get("max_issue_followups", DEFAULT_MAX_ISSUE_FOLLOWUPS)
+    env_value = os.environ.get("DANI_MAX_ISSUE_FOLLOWUPS")
+    if env_value:
+        value = env_value
+    return _parse_non_negative_int(value, name="max_issue_followups")
+
+
 def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> DaniConfig:
     config_payload = _load_config_file(data_dir)
     secret = os.environ.get("DANI_WEBHOOK_SECRET", "")
     agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "omx"))
     agent_timeout_seconds = _resolve_agent_timeout_seconds(config_payload)
+    bot_login = _resolve_bot_login(config_payload)
+    max_issue_followups = _resolve_max_issue_followups(config_payload)
     return DaniConfig(
         data_dir=data_dir,
         webhook_secret=secret,
@@ -69,6 +102,8 @@ def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> D
         port=port,
         agent_runtime=agent_runtime,
         agent_timeout_seconds=agent_timeout_seconds,
+        bot_login=bot_login,
+        max_issue_followups=max_issue_followups,
     )
 
 

@@ -133,3 +133,70 @@ def test_find_latest_session_can_filter_by_source_job_id(tmp_path: Path) -> None
     assert source_session is not None
     assert source_session.job_id == first_job.id
     assert source_session.omx_session_id == "omx-first"
+
+
+def test_storage_marks_and_queries_terminal_pr(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+
+    assert storage.is_terminal_pr("acme/demo", 70) is False
+
+    storage.mark_terminal_pr("acme/demo", 70, merged=True)
+
+    assert storage.is_terminal_pr("acme/demo", 70) is True
+    assert storage.is_terminal_pr("acme/other", 70) is False
+    assert storage.is_terminal_pr("acme/demo", 71) is False
+
+    storage.mark_terminal_pr("acme/demo", 70, merged=True)
+    assert storage.is_terminal_pr("acme/demo", 70) is True
+
+
+def test_storage_marks_terminal_pr_unmerged_and_queries(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+
+    storage.mark_terminal_pr("acme/demo", 71, merged=False)
+
+    assert storage.is_terminal_pr("acme/demo", 71) is True
+
+
+def test_storage_marks_and_queries_terminal_issue(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+
+    assert storage.is_terminal_issue("acme/demo", 58) is False
+
+    storage.mark_terminal_issue("acme/demo", 58)
+
+    assert storage.is_terminal_issue("acme/demo", 58) is True
+    assert storage.is_terminal_issue("acme/other", 58) is False
+    assert storage.is_terminal_issue("acme/demo", 59) is False
+
+    storage.mark_terminal_issue("acme/demo", 58)
+    assert storage.is_terminal_issue("acme/demo", 58) is True
+
+
+def test_storage_terminal_targets_persist_across_instances(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    storage.mark_terminal_pr("acme/demo", 70, merged=True)
+    storage.mark_terminal_issue("acme/demo", 58)
+
+    reloaded = JsonStorage(config)
+
+    assert reloaded.is_terminal_pr("acme/demo", 70) is True
+    assert reloaded.is_terminal_issue("acme/demo", 58) is True
+
+
+def test_storage_terminal_targets_snapshot_includes_payload(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    storage.mark_terminal_pr("acme/demo", 70, merged=True)
+    storage.mark_terminal_issue("acme/demo", 58)
+
+    snapshot = storage.snapshot()
+
+    assert snapshot["terminal_targets"] == {
+        "prs": [{"repo": "acme/demo", "pr": 70, "merged": True}],
+        "issues": [{"repo": "acme/demo", "issue": 58}],
+    }
