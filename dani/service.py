@@ -29,7 +29,7 @@ from dani.models import (
     effective_session_runtime,
     utc_now,
 )
-from dani.prompts import render_prompt
+from dani.prompts import NON_INTERACTIVE_GUARD, ensure_non_interactive_guard, render_prompt, split_non_interactive_guard
 from dani.queue import RepoQueueManager
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
@@ -1362,14 +1362,16 @@ class DaniService:
         return self._apply_bridge_context(prompt, bridge_prompt)
 
     def _apply_bridge_context(self, prompt: str, bridge_prompt: str) -> str:
+        guarded_prompt = ensure_non_interactive_guard(prompt)
         if not bridge_prompt.strip():
-            return prompt
-        return (
+            return guarded_prompt
+        bridge_block = (
             f"{bridge_prompt}\n\n"
             "Use the imported OMO context above only as bounded background context. "
-            "This is not a native resume; continue from it conservatively.\n\n"
-            f"{prompt}"
+            "This is not a native resume; continue from it conservatively."
         )
+        prompt_body = split_non_interactive_guard(guarded_prompt)
+        return f"{NON_INTERACTIVE_GUARD}\n{bridge_block}\n\n{prompt_body}"
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         if job.stage == "issue_request":
@@ -1518,7 +1520,7 @@ class DaniService:
         expected_signature = str(job.metadata.get("expected_signature", ""))
         original_error = str(job.metadata.get("original_error", ""))
         comment_body = str(job.metadata.get("comment_body", ""))
-        return (
+        prompt = (
             f"You are operating inside repository: {repo.full_name}\n"
             f"Local path: {repo.local_path}\n"
             f"Recovery task for GitHub issue #{issue_number}: {issue_title}\n\n"
@@ -1542,6 +1544,7 @@ class DaniService:
             f"gh issue comment {issue_number} --repo {repo.full_name} --body-file <recovery-comment.md>\n\n"
             "After posting the comment, exit."
         )
+        return ensure_non_interactive_guard(prompt)
 
     def _build_review_round_prompt(
         self,
