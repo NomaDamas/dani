@@ -21,6 +21,7 @@ class JsonStorage:
         self._ensure_json_file(self.config.jobs_path, {"jobs": []})
         self._ensure_json_file(self.config.sessions_path, {"sessions": []})
         self._ensure_json_file(self.config.processed_events_path, {"keys": []})
+        self._ensure_json_file(self.config.terminal_targets_path, {"prs": [], "issues": []})
         if not self.config.events_path.exists():
             self.config.events_path.write_text("", encoding="utf-8")
 
@@ -185,6 +186,42 @@ class JsonStorage:
             payload = self._read_json(self.config.processed_events_path)
             return key in payload["keys"]
 
+    def mark_terminal_pr(self, repo_full_name: str, pr_number: int, *, merged: bool) -> None:
+        with self._lock:
+            payload = self._read_json(self.config.terminal_targets_path)
+            entries = payload.setdefault("prs", [])
+            for entry in entries:
+                if entry.get("repo") == repo_full_name and entry.get("pr") == pr_number:
+                    return
+            entries.append({"repo": repo_full_name, "pr": pr_number, "merged": bool(merged)})
+            self._write_json(self.config.terminal_targets_path, payload)
+
+    def is_terminal_pr(self, repo_full_name: str, pr_number: int) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.terminal_targets_path)
+            for entry in payload.get("prs", []):
+                if entry.get("repo") == repo_full_name and entry.get("pr") == pr_number:
+                    return True
+        return False
+
+    def mark_terminal_issue(self, repo_full_name: str, issue_number: int) -> None:
+        with self._lock:
+            payload = self._read_json(self.config.terminal_targets_path)
+            entries = payload.setdefault("issues", [])
+            for entry in entries:
+                if entry.get("repo") == repo_full_name and entry.get("issue") == issue_number:
+                    return
+            entries.append({"repo": repo_full_name, "issue": issue_number})
+            self._write_json(self.config.terminal_targets_path, payload)
+
+    def is_terminal_issue(self, repo_full_name: str, issue_number: int) -> bool:
+        with self._lock:
+            payload = self._read_json(self.config.terminal_targets_path)
+            for entry in payload.get("issues", []):
+                if entry.get("repo") == repo_full_name and entry.get("issue") == issue_number:
+                    return True
+        return False
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -192,5 +229,6 @@ class JsonStorage:
                 "jobs": self._read_json(self.config.jobs_path),
                 "sessions": self._read_json(self.config.sessions_path),
                 "processed_events": self._read_json(self.config.processed_events_path),
+                "terminal_targets": self._read_json(self.config.terminal_targets_path),
                 "events_path": str(self.config.events_path),
             }
