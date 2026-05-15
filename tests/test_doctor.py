@@ -421,3 +421,608 @@ def test_allowed_threshold_keys_is_frozenset():
     assert isinstance(ALLOWED_THRESHOLD_KEYS, frozenset)
     assert "runs_bytes_warn" in ALLOWED_THRESHOLD_KEYS
     assert "unknown_random_key" not in ALLOWED_THRESHOLD_KEYS
+
+
+# ============================================================
+# W5: per-check tests
+# ============================================================
+
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from dani.doctor import (  # noqa: E402
+    _check_backup_files,
+    _check_binaries,
+    _check_config_env,
+    _check_disk_usage,
+    _check_github_auth,
+    _check_process_sprawl,
+    _check_registered_repos,
+    _check_server_health,
+    _check_storage_files,
+    _check_stuck_jobs,
+    _check_stuck_sessions,
+)
+
+
+def _make_ctx(
+    data_dir: Path,
+    *,
+    env: dict[str, str] | None = None,
+    snapshot: dict[str, object] | None = None,
+    snapshot_errors: dict[str, str] | None = None,
+    config_parsed: dict[str, object] | None = None,
+    config_parse_error: str | None = None,
+    now_utc: datetime | None = None,
+    thresholds: dict[str, int] | None = None,
+    port: int = 8787,
+    timeout_seconds: float = 5.0,
+    verbose: bool = False,
+) -> CheckContext:
+    if snapshot is None:
+        snapshot = {
+            "registry": {"repos": []},
+            "jobs": {"jobs": []},
+            "sessions": {"sessions": []},
+            "processed_events": {"keys": []},
+            "terminal_targets": {"prs": [], "issues": []},
+            "events_jsonl_meta": {
+                "exists": False,
+                "size_bytes": 0,
+                "line_count": 0,
+                "first_line_parsed": False,
+                "last_line_parsed": False,
+                "last_line_invalid": False,
+                "error": "missing",
+            },
+        }
+    return CheckContext(
+        data_dir=data_dir,
+        config_parsed=config_parsed,
+        config_parse_error=config_parse_error,
+        snapshot=snapshot,
+        snapshot_errors=snapshot_errors or {},
+        env=env or {},
+        now_utc=now_utc or datetime.now(tz=timezone.utc),
+        timeout_seconds=timeout_seconds,
+        verbose=verbose,
+        thresholds=thresholds or {},
+        port=port,
+        no_color=True,
+    )
+
+
+def test_config_env_fail_when_secret_and_token_missing(tmp_path: Path):
+    ctx = _make_ctx(tmp_path, env={})
+    result = _check_config_env(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert "DANI_WEBHOOK_SECRET" in result.summary
+    assert "GitHub token" in result.summary
+
+
+def test_config_env_ok_when_secret_and_token_set(tmp_path: Path):
+    ctx = _make_ctx(
+        tmp_path,
+        env={"DANI_WEBHOOK_SECRET": "x", "DANI_GITHUB_TOKEN": "y"},
+    )
+    result = _check_config_env(ctx)
+    assert result.status == CheckStatus.OK
+    assert result.details["github_token_source"] == "DANI_GITHUB_TOKEN"
+
+
+def test_config_env_warn_on_bad_runtime(tmp_path: Path):
+    ctx = _make_ctx(
+        tmp_path,
+        env={
+            "DANI_WEBHOOK_SECRET": "x",
+            "DANI_GITHUB_TOKEN": "y",
+            "DANI_AGENT_RUNTIME": "made-up",
+        },
+    )
+    result = _check_config_env(ctx)
+    assert result.status == CheckStatus.WARN
+    assert "made-up" in result.summary
+
+
+def test_config_env_fail_on_config_parse_error(tmp_path: Path):
+    ctx = _make_ctx(
+        tmp_path,
+        env={"DANI_WEBHOOK_SECRET": "x", "DANI_GITHUB_TOKEN": "y"},
+        config_parse_error="JSONDecodeError: x",
+    )
+    result = _check_config_env(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert "JSONDecodeError" in result.details["config_parse_error"]
+
+
+def test_binaries_fail_when_git_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omx"})
+    result = _check_binaries(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert "git" in result.summary
+
+
+def test_binaries_ok_omx_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_paths = {
+        "git": "/usr/bin/git",
+        "gh": "/usr/bin/gh",
+        "omx": "/usr/bin/omx",
+        "codex": "/usr/bin/codex",
+    }
+    monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omx"})
+    result = _check_binaries(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_binaries_omo_external_server_skips_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_paths = {"git": "/usr/bin/git", "gh": "/usr/bin/gh"}
+    monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    ctx = _make_ctx(
+        tmp_path,
+        env={
+            "DANI_AGENT_RUNTIME": "omo",
+            "DANI_OPENCODE_SERVER_URL": "http://127.0.0.1:4096",
+        },
+    )
+    result = _check_binaries(ctx)
+    assert result.status == CheckStatus.OK
+    opencode_rec = next(r for r in result.details["binaries"] if r["name"] == "opencode")
+    assert opencode_rec["severity"] == "skip"
+
+
+def test_binaries_omo_runtime_fails_without_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/git" if name == "git" else None)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omo"})
+    result = _check_binaries(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert "opencode" in result.summary
+
+
+def test_storage_files_ok(populated_data_dir: Path):
+    snapshot, errors = read_only_snapshot(populated_data_dir)
+    ctx = _make_ctx(populated_data_dir, snapshot=snapshot, snapshot_errors=errors)
+    result = _check_storage_files(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_storage_files_fail_on_corrupt_jobs(tmp_path: Path):
+    (tmp_path / "jobs.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "registry.json").write_text(json.dumps({"repos": []}), encoding="utf-8")
+    (tmp_path / "sessions.json").write_text(json.dumps({"sessions": []}), encoding="utf-8")
+    snapshot, errors = read_only_snapshot(tmp_path, retry_delay_s=0.0)
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, snapshot_errors=errors)
+    result = _check_storage_files(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert "jobs.json" in result.summary
+
+
+def test_storage_files_warns_on_events_jsonl_last_line_invalid(tmp_path: Path):
+    (tmp_path / "registry.json").write_text(json.dumps({"repos": []}), encoding="utf-8")
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": []}), encoding="utf-8")
+    (tmp_path / "sessions.json").write_text(json.dumps({"sessions": []}), encoding="utf-8")
+    (tmp_path / "events.jsonl").write_text(json.dumps({"a": 1}) + "\n" + "{nope\n", encoding="utf-8")
+    snapshot, errors = read_only_snapshot(tmp_path, retry_delay_s=0.0)
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, snapshot_errors=errors)
+    result = _check_storage_files(ctx)
+    assert result.status == CheckStatus.WARN
+    assert "events.jsonl" in result.summary
+
+
+def test_registered_repos_skip_when_empty(tmp_path: Path):
+    ctx = _make_ctx(tmp_path)
+    result = _check_registered_repos(ctx)
+    assert result.status == CheckStatus.SKIP
+
+
+def test_registered_repos_fail_missing_local_path(tmp_path: Path):
+    ctx = _make_ctx(
+        tmp_path,
+        snapshot={
+            "registry": {
+                "repos": [
+                    {
+                        "full_name": "x/y",
+                        "local_path": str(tmp_path / "does-not-exist"),
+                        "main_branch": "main",
+                        "dev_branch": "dev",
+                        "enabled": True,
+                    }
+                ]
+            },
+            "jobs": {"jobs": []},
+            "sessions": {"sessions": []},
+            "processed_events": {"keys": []},
+            "terminal_targets": {"prs": [], "issues": []},
+            "events_jsonl_meta": {"exists": False, "size_bytes": 0},
+        },
+    )
+    result = _check_registered_repos(ctx)
+    assert result.status == CheckStatus.FAIL
+
+
+def test_registered_repos_ok_with_real_git_repo(tmp_path: Path):
+    import subprocess
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], check=True, cwd=repo_path)  # noqa: S603, S607
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "x@y")
+    _git("config", "user.name", "x")
+    (repo_path / "README").write_text("hello", encoding="utf-8")
+    _git("add", ".")
+    _git("commit", "-q", "-m", "init")
+    _git("branch", "dev")
+    ctx = _make_ctx(
+        tmp_path,
+        snapshot={
+            "registry": {
+                "repos": [
+                    {
+                        "full_name": "x/y",
+                        "local_path": str(repo_path),
+                        "main_branch": "main",
+                        "dev_branch": "dev",
+                        "enabled": True,
+                    }
+                ]
+            },
+            "jobs": {"jobs": []},
+            "sessions": {"sessions": []},
+            "processed_events": {"keys": []},
+            "terminal_targets": {"prs": [], "issues": []},
+            "events_jsonl_meta": {"exists": False, "size_bytes": 0},
+        },
+        timeout_seconds=10.0,
+    )
+    result = _check_registered_repos(ctx)
+    assert result.status == CheckStatus.OK
+    repo_record = result.details["repos"][0]
+    assert repo_record["is_worktree"] is True
+    assert repo_record["main_branch_ok"] is True
+    assert repo_record["dev_branch_ok"] is True
+
+
+def test_github_auth_skip_no_token(tmp_path: Path):
+    ctx = _make_ctx(tmp_path, env={})
+    result = _check_github_auth(ctx)
+    assert result.status == CheckStatus.SKIP
+
+
+def test_github_auth_fail_bad_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from github.GithubException import BadCredentialsException
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            raise BadCredentialsException(401, "bad", None)
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    ctx = _make_ctx(tmp_path, env={"DANI_GITHUB_TOKEN": "bad-token-XYZ"})
+    result = _check_github_auth(ctx)
+    assert result.status == CheckStatus.FAIL
+    rendered = json.dumps(result.details) + result.summary
+    assert "bad-token-XYZ" not in rendered
+
+
+def test_github_auth_warn_low_rate_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeCore:
+        remaining = 5
+        limit = 5000
+        reset = datetime.now(tz=timezone.utc)
+
+    class FakeRate:
+        core = FakeCore()
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            return FakeRate()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    ctx = _make_ctx(tmp_path, env={"DANI_GITHUB_TOKEN": "good"})
+    result = _check_github_auth(ctx)
+    assert result.status == CheckStatus.WARN
+    assert "5/5000" in result.summary
+
+
+def test_github_auth_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    class FakeCore:
+        remaining = 4000
+        limit = 5000
+        reset = datetime.now(tz=timezone.utc)
+
+    class FakeRate:
+        core = FakeCore()
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            return FakeRate()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    ctx = _make_ctx(tmp_path, env={"DANI_GITHUB_TOKEN": "good"})
+    result = _check_github_auth(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_server_health_skip_when_not_listening(tmp_path: Path):
+    ctx = _make_ctx(tmp_path, port=1)
+    result = _check_server_health(ctx)
+    assert result.status == CheckStatus.SKIP
+    assert result.details["listening"] is False
+
+
+def test_server_health_ok_with_local_server(tmp_path: Path):
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        ctx = _make_ctx(tmp_path, port=port)
+        result = _check_server_health(ctx)
+        assert result.status == CheckStatus.OK
+        assert result.details["http_status"] == 200
+    finally:
+        server.shutdown()
+        thread.join(timeout=2.0)
+
+
+def test_server_health_warn_on_wrong_body(tmp_path: Path):
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"hello world")
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        ctx = _make_ctx(tmp_path, port=port)
+        result = _check_server_health(ctx)
+        assert result.status == CheckStatus.WARN
+        assert result.details["likely_not_dani"] is True
+    finally:
+        server.shutdown()
+        thread.join(timeout=2.0)
+
+
+def _job(
+    job_id: str,
+    *,
+    status: str,
+    updated_at: datetime,
+    stage: str = "implementation",
+    repo: str = "x/y",
+) -> dict[str, object]:
+    return {
+        "id": job_id,
+        "status": status,
+        "stage": stage,
+        "repo_full_name": repo,
+        "updated_at": updated_at.isoformat(),
+        "created_at": updated_at.isoformat(),
+    }
+
+
+def _session(
+    session_id: str,
+    *,
+    status: str,
+    updated_at: datetime,
+    job_id: str | None = None,
+    stage: str = "implementation",
+    repo: str = "x/y",
+) -> dict[str, object]:
+    return {
+        "id": session_id,
+        "status": status,
+        "stage": stage,
+        "repo_full_name": repo,
+        "updated_at": updated_at.isoformat(),
+        "created_at": updated_at.isoformat(),
+        "job_id": job_id,
+    }
+
+
+def test_stuck_jobs_ok(tmp_path: Path):
+    now = datetime.now(tz=timezone.utc)
+    ctx = _make_ctx(
+        tmp_path,
+        snapshot={
+            "jobs": {"jobs": [_job("j1", status="completed", updated_at=now)]},
+            "sessions": {"sessions": []},
+        },
+        now_utc=now,
+    )
+    result = _check_stuck_jobs(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_stuck_jobs_warn(tmp_path: Path):
+    now = datetime.now(tz=timezone.utc)
+    stale = now - timedelta(hours=10)
+    ctx = _make_ctx(
+        tmp_path,
+        snapshot={
+            "jobs": {"jobs": [_job("j1", status="launched", updated_at=stale)]},
+            "sessions": {"sessions": []},
+        },
+        now_utc=now,
+        thresholds={"stuck_job_age_seconds": 3600},
+    )
+    result = _check_stuck_jobs(ctx)
+    assert result.status == CheckStatus.WARN
+    assert result.details["stuck_count"] == 1
+
+
+def test_stuck_sessions_fail_on_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(tz=timezone.utc)
+    old = now - timedelta(hours=10)
+    snapshot = {
+        "jobs": {"jobs": [_job("j1", status="completed", updated_at=old)]},
+        "sessions": {"sessions": [_session("s1", status="launched", updated_at=old, job_id="j1")]},
+    }
+    monkeypatch.setattr("dani.doctor.read_only_snapshot", lambda *a, **kw: (snapshot, {}))
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, now_utc=now)
+    result = _check_stuck_sessions(ctx)
+    assert result.status == CheckStatus.FAIL
+    assert len(result.details["drift"]) == 1
+
+
+def test_stuck_sessions_drift_in_grace_window_not_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(tz=timezone.utc)
+    fresh = now - timedelta(seconds=10)
+    snapshot = {
+        "jobs": {"jobs": [_job("j1", status="completed", updated_at=fresh)]},
+        "sessions": {"sessions": [_session("s1", status="launched", updated_at=fresh, job_id="j1")]},
+    }
+    monkeypatch.setattr("dani.doctor.read_only_snapshot", lambda *a, **kw: (snapshot, {}))
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, now_utc=now)
+    result = _check_stuck_sessions(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_stuck_sessions_orphan_session_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(tz=timezone.utc)
+    old = now - timedelta(hours=10)
+    snapshot = {
+        "jobs": {"jobs": []},
+        "sessions": {"sessions": [_session("s1", status="launched", updated_at=old, job_id="missing")]},
+    }
+    monkeypatch.setattr("dani.doctor.read_only_snapshot", lambda *a, **kw: (snapshot, {}))
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, now_utc=now)
+    result = _check_stuck_sessions(ctx)
+    assert result.status == CheckStatus.WARN
+    assert len(result.details["orphans"]) == 1
+
+
+def test_stuck_sessions_long_running_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(tz=timezone.utc)
+    very_old = now - timedelta(days=10)
+    snapshot = {
+        "jobs": {"jobs": [_job("j1", status="launched", updated_at=very_old)]},
+        "sessions": {"sessions": [_session("s1", status="launched", updated_at=very_old, job_id="j1")]},
+    }
+    monkeypatch.setattr("dani.doctor.read_only_snapshot", lambda *a, **kw: (snapshot, {}))
+    ctx = _make_ctx(tmp_path, snapshot=snapshot, now_utc=now)
+    result = _check_stuck_sessions(ctx)
+    assert result.status == CheckStatus.WARN
+    assert len(result.details["long_running"]) == 1
+
+
+def test_disk_usage_ok(populated_data_dir: Path):
+    ctx = _make_ctx(populated_data_dir)
+    result = _check_disk_usage(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_disk_usage_fail_when_threshold_exceeded(populated_data_dir: Path):
+    big = populated_data_dir / "jobs.json"
+    big.write_text("x" * 1024, encoding="utf-8")
+    ctx = _make_ctx(populated_data_dir, thresholds={"jobs_bytes_fail": 100, "jobs_bytes_warn": 50})
+    result = _check_disk_usage(ctx)
+    assert result.status == CheckStatus.FAIL
+
+
+def test_disk_usage_warn_on_runs(populated_data_dir: Path):
+    runs = populated_data_dir / "runs"
+    runs.mkdir()
+    (runs / "blob").write_text("hi" * 200, encoding="utf-8")
+    ctx = _make_ctx(populated_data_dir, thresholds={"runs_bytes_warn": 1, "runs_bytes_fail": 1_000_000_000})
+    result = _check_disk_usage(ctx)
+    assert result.status == CheckStatus.WARN
+
+
+def test_backup_files_ok(tmp_path: Path):
+    ctx = _make_ctx(tmp_path)
+    result = _check_backup_files(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_backup_files_warn_on_count(tmp_path: Path):
+    for i in range(5):
+        (tmp_path / f"jobs.json.bak.{i}").write_text("x", encoding="utf-8")
+    ctx = _make_ctx(tmp_path)
+    result = _check_backup_files(ctx)
+    assert result.status == CheckStatus.WARN
+    assert "count 5" in result.summary
+
+
+def test_process_sprawl_skip_when_ps_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (-1, []))
+    ctx = _make_ctx(tmp_path)
+    result = _check_process_sprawl(ctx)
+    assert result.status == CheckStatus.SKIP
+
+
+def test_process_sprawl_ok_under_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "dani.doctor._ps_run",
+        lambda *a, **kw: (0, ["1234 1 01:23"]),
+    )
+    monkeypatch.setattr("dani.doctor._classify_ps_command", lambda cmd: "omx_exec" if "omx" in cmd else None)
+    monkeypatch.setattr(
+        "dani.doctor._ps_run",
+        lambda args, **kw: (0, ["1234 1 01:23"]) if "-axo" in args else (0, ["omx exec something"]),
+    )
+    ctx = _make_ctx(tmp_path)
+    result = _check_process_sprawl(ctx)
+    assert result.status == CheckStatus.OK
+
+
+def test_process_sprawl_warn_over_threshold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    pids = [f"{i} 1 01:23" for i in range(25)]
+
+    def fake_ps_run(args, *, timeout_s):
+        if "-axo" in args:
+            return 0, pids
+        return 0, ["omx exec full prompt that should never leak"]
+
+    monkeypatch.setattr("dani.doctor._ps_run", fake_ps_run)
+    ctx = _make_ctx(tmp_path)
+    result = _check_process_sprawl(ctx)
+    assert result.status == CheckStatus.WARN
+    rendered = json.dumps(result.details)
+    assert "full prompt that should never leak" not in rendered
+    for sample in result.details["sample"]:
+        assert "command" not in sample
+        assert "argv" not in sample
