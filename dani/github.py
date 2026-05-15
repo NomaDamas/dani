@@ -158,6 +158,27 @@ class GitHubCLI:
             return pull_request.raw_data
         return repo.create_pull(title=title, body=body, base=base, head=head).raw_data
 
+    def is_org_member(self, org: str, username: str) -> bool:
+        if not org or not username:
+            return False
+        client = self._client_for_request()
+        try:
+            organization = client.get_organization(org)
+            user = client.get_user(username)
+        except UnknownObjectException:
+            return False
+        try:
+            return bool(organization.has_in_members(user))
+        except UnknownObjectException:
+            return False
+
+    def add_issue_comment_reaction(
+        self, repo_full_name: str, issue_number: int, comment_id: int, reaction: str
+    ) -> None:
+        issue = self._repo(repo_full_name).get_issue(issue_number)
+        comment = issue.get_comment(comment_id)
+        comment.create_reaction(reaction)
+
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         try:
