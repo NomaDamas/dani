@@ -25,7 +25,7 @@ class FakeGitHubCLI:
         self.users: dict[str, dict[str, Any]] = {}
         self.closed_pull_requests: list[tuple[str, int]] = []
         self.org_members_by_casefolded_org: dict[str, set[str]] = {}
-        self.recorded_issue_comment_reactions: list[tuple[str, int, str]] = []
+        self.recorded_issue_comment_reactions: list[tuple[str, int, int, str]] = []
         self.simulated_reaction_failure: Exception | None = None
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
