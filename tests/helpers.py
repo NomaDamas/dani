@@ -24,6 +24,9 @@ class FakeGitHubCLI:
         self.issue_labels: dict[tuple[str, int], list[str]] = {}
         self.users: dict[str, dict[str, Any]] = {}
         self.closed_pull_requests: list[tuple[str, int]] = []
+        self.org_members_by_casefolded_org: dict[str, set[str]] = {}
+        self.recorded_issue_comment_reactions: list[tuple[str, int, str]] = []
+        self.simulated_reaction_failure: Exception | None = None
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -142,6 +145,24 @@ class FakeGitHubCLI:
             if pr.get("number") == pr_number:
                 pr["state"] = "closed"
                 return
+
+    def register_org_member(self, org: str, username: str) -> None:
+        self.org_members_by_casefolded_org.setdefault(org.casefold(), set()).add(username.casefold())
+
+    def is_org_member(self, org: str, username: str) -> bool:
+        if not org or not username:
+            return False
+        members = self.org_members_by_casefolded_org.get(org.casefold())
+        if not members:
+            return False
+        return username.casefold() in members
+
+    def add_issue_comment_reaction(
+        self, repo_full_name: str, issue_number: int, comment_id: int, reaction: str
+    ) -> None:
+        if self.simulated_reaction_failure is not None:
+            raise self.simulated_reaction_failure
+        self.recorded_issue_comment_reactions.append((repo_full_name, issue_number, comment_id, reaction))
 
 
 class LaunchRecord(TypedDict):

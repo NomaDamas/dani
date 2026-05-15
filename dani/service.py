@@ -238,9 +238,60 @@ class DaniService:
             return {"status": "ignored", "reason": "issue_closed"}
         if self.storage.is_terminal_issue(repo.full_name, event.number):
             return {"status": "ignored", "reason": "issue_terminal"}
+        if not self._is_authorized_approver(repo, event):
+            self._react_unauthorized_approve(repo, event)
+            return {"status": "ignored", "reason": "approver_not_authorized"}
         if self._has_existing_implementation_job(repo.full_name, event.number):
             return {"status": "ignored", "reason": "duplicate_implementation"}
         return self._queue_implementation(repo, event)
+
+    _TRUSTED_APPROVE_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
+
+    def _is_authorized_approver(self, repo: RepoConfig, event: NormalizedEvent) -> bool:
+        owner_login = repo.full_name.split("/", 1)[0]
+        actor = event.actor_login or ""
+        if not actor:
+            return False
+        if actor.casefold() == owner_login.casefold():
+            return True
+        comment = event.payload.get("comment") if isinstance(event.payload, dict) else None
+        author_association = ""
+        if isinstance(comment, dict):
+            author_association = str(comment.get("author_association") or "").upper()
+        if author_association in self._TRUSTED_APPROVE_AUTHOR_ASSOCIATIONS:
+            return True
+        try:
+            return bool(self.github.is_org_member(owner_login, actor))
+        except Exception:
+            logger.warning(
+                "approve_owner_check_failed",
+                extra={
+                    "repo_full_name": repo.full_name,
+                    "owner_login": owner_login,
+                    "actor_login": actor,
+                },
+                exc_info=True,
+            )
+            return False
+
+    def _react_unauthorized_approve(self, repo: RepoConfig, event: NormalizedEvent) -> None:
+        comment = event.payload.get("comment") if isinstance(event.payload, dict) else None
+        comment_id = comment.get("id") if isinstance(comment, dict) else None
+        if not isinstance(comment_id, int):
+            return
+        try:
+            self.github.add_issue_comment_reaction(repo.full_name, event.number, comment_id, "-1")
+        except Exception:
+            logger.warning(
+                "approve_unauthorized_reaction_failed",
+                extra={
+                    "repo_full_name": repo.full_name,
+                    "issue_number": event.number,
+                    "actor_login": event.actor_login,
+                    "comment_id": comment_id,
+                },
+                exc_info=True,
+            )
 
     def _dispatch_issue_followup_comment(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         if event.issue_state == "closed":
@@ -1973,11 +2024,7 @@ class DaniService:
         review_round_cap = 1 if untracked else self.config.review_rounds
 
         if len(consumed_review_rounds) >= review_round_cap:
-            reason = (
-                "untracked_external_review_round_consumed"
-                if untracked
-                else "external_review_rounds_exhausted"
-            )
+            reason = "untracked_external_review_round_consumed" if untracked else "external_review_rounds_exhausted"
             return {"status": "ignored", "reason": reason}
 
         next_review_round = max(consumed_review_rounds, default=0) + 1

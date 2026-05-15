@@ -869,8 +869,8 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
         repo_full_name="acme/demo",
         action="created",
         number=11,
-        actor_login="human",
-        payload={"issue": {"body": "context"}},
+        actor_login="acme",
+        payload={"issue": {"body": "context"}, "comment": {"id": 1, "author_association": "OWNER"}},
         body="/approve",
         title="Need automation",
     )
@@ -881,6 +881,204 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     assert result["stage"] == "implementation"
     assert omx_runner.launches[0]["job"].stage == "implementation"
     assert service.storage.list_jobs()[0].status == "completed"
+
+
+def test_approve_from_repo_owner_login_queues_implementation(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=21,
+            actor_login="ACME",
+            payload={"issue": {"body": "context"}, "comment": {"id": 100}},
+            body="/approve",
+            title="Owner approval",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_with_owner_author_association_queues_implementation(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=22,
+            actor_login="some-account",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 101, "author_association": "OWNER"},
+            },
+            body="/approve",
+            title="Author association OWNER",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_with_member_author_association_queues_without_membership_api_call(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=23,
+            actor_login="alice",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 102, "author_association": "MEMBER"},
+            },
+            body="/approve",
+            title="Author association MEMBER",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert github.org_members_by_casefolded_org == {}
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_from_org_member_queues_implementation(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.register_org_member("acme", "alice")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=24,
+            actor_login="ALICE",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 103, "author_association": "NONE"},
+            },
+            body="/approve",
+            title="Member fallthrough",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_from_unauthorized_actor_is_ignored_with_thumbs_down_reaction(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.register_org_member("acme", "alice")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=25,
+            actor_login="malicious-user",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 12345, "author_association": "CONTRIBUTOR"},
+            },
+            body="/approve",
+            title="Unauthorized approve",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=25) == []
+    assert omx_runner.launches == []
+    assert github.recorded_issue_comment_reactions == [("acme/demo", 25, 12345, "-1")]
+
+
+def test_approve_from_collaborator_is_ignored(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=26,
+            actor_login="outside-collab",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 200, "author_association": "COLLABORATOR"},
+            },
+            body="/approve",
+            title="Collaborator approve",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert omx_runner.launches == []
+    assert github.recorded_issue_comment_reactions == [("acme/demo", 26, 200, "-1")]
+
+
+def test_approve_unauthorized_skips_reaction_when_comment_id_missing(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=27,
+            actor_login="malicious-user",
+            payload={"issue": {"body": "context"}},
+            body="/approve",
+            title="Missing comment id",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert omx_runner.launches == []
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_unauthorized_swallows_reaction_failure(tmp_path: Path) -> None:
+    service, github, omx_runner = make_service(tmp_path)
+    github.simulated_reaction_failure = RuntimeError("github outage")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=28,
+            actor_login="malicious-user",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 999, "author_association": "NONE"},
+            },
+            body="/approve",
+            title="Reaction outage",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert omx_runner.launches == []
 
 
 def test_failed_job_still_closes_runtime_handle_and_marks_failure(tmp_path: Path) -> None:
@@ -904,8 +1102,8 @@ def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: P
         repo_full_name="acme/demo",
         action="created",
         number=12,
-        actor_login="human",
-        payload={"issue": {"body": "Ship it"}},
+        actor_login="acme",
+        payload={"issue": {"body": "Ship it"}, "comment": {"id": 1, "author_association": "OWNER"}},
         body="/approve",
         title="Ship it",
     )
@@ -3394,8 +3592,8 @@ def test_second_approve_for_same_issue_is_deduplicated(tmp_path: Path) -> None:
         repo_full_name="acme/demo",
         action="created",
         number=13,
-        actor_login="h",
-        payload={"issue": {"body": "x"}},
+        actor_login="acme",
+        payload={"issue": {"body": "x"}, "comment": {"id": 1, "author_association": "OWNER"}},
         body="/approve",
         title="t",
         issue_state="open",
