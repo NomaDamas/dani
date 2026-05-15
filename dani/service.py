@@ -1927,9 +1927,9 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
-        if issue_number is None:
-            return {"status": "ignored", "reason": "untracked_pr"}
-        return self._queue_external_pull_request_review(repo, event, issue_number=issue_number)
+        return self._queue_external_pull_request_review(
+            repo, event, issue_number=issue_number, untracked=issue_number is None
+        )
 
     def _external_pull_request_guard(
         self, repo: RepoConfig, event: NormalizedEvent, *, is_agent_managed_pr: bool
@@ -1962,29 +1962,39 @@ class DaniService:
         repo: RepoConfig,
         event: NormalizedEvent,
         *,
-        issue_number: int,
+        issue_number: int | None,
+        untracked: bool = False,
     ) -> dict[str, Any]:
         event_key = self._external_pull_request_event_key(event)
         if not self.storage.record_processed_event(event_key):
             return {"status": "ignored", "reason": "duplicate_external_pr_event"}
 
         consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
+        review_round_cap = 1 if untracked else self.config.review_rounds
 
-        if len(consumed_review_rounds) >= self.config.review_rounds:
-            return {"status": "ignored", "reason": "external_review_rounds_exhausted"}
+        if len(consumed_review_rounds) >= review_round_cap:
+            reason = (
+                "untracked_external_review_round_consumed"
+                if untracked
+                else "external_review_rounds_exhausted"
+            )
+            return {"status": "ignored", "reason": reason}
 
         next_review_round = max(consumed_review_rounds, default=0) + 1
+        metadata: dict[str, Any] = {
+            "title": event.title or "",
+            "body": event.body or "",
+            **self._external_pr_metadata(event),
+        }
+        if untracked:
+            metadata["untracked"] = True
         job = self._enqueue_job(
             repo,
             stage="review_round",
             issue_number=issue_number,
             pr_number=event.number,
             review_round=next_review_round,
-            metadata={
-                "title": event.title or "",
-                "body": event.body or "",
-                **self._external_pr_metadata(event),
-            },
+            metadata=metadata,
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
 

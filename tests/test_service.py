@@ -2223,8 +2223,7 @@ def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
     assert github.merged == []
 
 
-def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
-    """A PR opened without any linked issue number is dropped as untracked."""
+def test_pr_opened_without_issue_reference_queues_single_review_round(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
 
     result = service.handle_event(
@@ -2242,10 +2241,102 @@ def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
             is_pull_request=True,
         )
     )
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert [job.review_round for job in review_jobs] == [1]
+    assert review_jobs[0].issue_number is None
+    assert review_jobs[0].metadata.get("untracked") is True
+    assert review_jobs[0].metadata.get("external_contribution") is True
+    assert omx_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_untracked_external_pr_caps_at_one_review_round(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            commit_sha="sha-initial",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    second = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="synchronize",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            commit_sha="sha-followup",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    assert second == {"status": "ignored", "reason": "untracked_external_review_round_consumed"}
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert [job.review_round for job in review_jobs] == [1]
+
+
+def test_untracked_external_pr_review_round_does_not_spawn_implementation(tmp_path: Path) -> None:
+    service, _, omx_runner = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert len(review_jobs) == 1
+    job_id = review_jobs[0].id
+
+    review_signature_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job=job_id, pr=42, round=1),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_signature_event)
+    service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "untracked_pr"}
-    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
-    assert omx_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
+    assert all(launch["job"].stage != "implementation" for launch in omx_runner.launches)
 
 
 def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
