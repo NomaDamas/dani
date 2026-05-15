@@ -449,9 +449,9 @@ def _make_ctx(
     data_dir: Path,
     *,
     env: dict[str, str] | None = None,
-    snapshot: dict[str, object] | None = None,
+    snapshot: dict[str, Any] | None = None,
     snapshot_errors: dict[str, str] | None = None,
-    config_parsed: dict[str, object] | None = None,
+    config_parsed: dict[str, Any] | None = None,
     config_parse_error: str | None = None,
     now_utc: datetime | None = None,
     thresholds: dict[str, int] | None = None,
@@ -781,7 +781,7 @@ def test_server_health_ok_with_local_server(tmp_path: Path):
                 self.send_response(404)
                 self.end_headers()
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
 
     server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
@@ -808,7 +808,7 @@ def test_server_health_warn_on_wrong_body(tmp_path: Path):
             self.end_headers()
             self.wfile.write(b"hello world")
 
-        def log_message(self, *_args):
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
             return
 
     server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
@@ -832,7 +832,7 @@ def _job(
     updated_at: datetime,
     stage: str = "implementation",
     repo: str = "x/y",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "id": job_id,
         "status": status,
@@ -851,7 +851,7 @@ def _session(
     job_id: str | None = None,
     stage: str = "implementation",
     repo: str = "x/y",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     return {
         "id": session_id,
         "status": status,

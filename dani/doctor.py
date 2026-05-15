@@ -1271,8 +1271,8 @@ def _check_github_auth(ctx: CheckContext) -> CheckResult:
             details={"source": None},
         )
     try:
-        from github import Auth, Github  # type: ignore[import-not-found]
-        from github.GithubException import BadCredentialsException, GithubException  # type: ignore[import-not-found]
+        from github import Auth, Github
+        from github.GithubException import BadCredentialsException, GithubException
     except ImportError as exc:
         return CheckResult(
             name="github_auth",
