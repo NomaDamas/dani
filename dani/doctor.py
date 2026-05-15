@@ -813,3 +813,1022 @@ def resolve_port(explicit: int | None, env: Mapping[str, str], default: int = 87
         except ValueError:
             return default
     return default
+
+
+# ============================================================
+# 11. Built-in checks
+# ============================================================
+
+
+VALID_AGENT_RUNTIMES = frozenset({
+    "omx",
+    "oh-my-codex",
+    "codex",
+    "omo",
+    "oh-my-openagents",
+    "oh-my-openagent",
+    "opencode",
+})
+OMX_FAMILY = frozenset({"omx", "oh-my-codex", "codex"})
+OMO_FAMILY = frozenset({"omo", "oh-my-openagents", "oh-my-openagent", "opencode"})
+
+
+def _resolved_agent_runtime(ctx: CheckContext) -> str:
+    env_value = ctx.env.get("DANI_AGENT_RUNTIME")
+    if env_value:
+        return env_value
+    if ctx.config_parsed and "agent_runtime" in ctx.config_parsed:
+        return str(ctx.config_parsed["agent_runtime"])
+    return "omx"
+
+
+def _resolved_agent_timeout(ctx: CheckContext) -> float:
+    env_value = ctx.env.get("DANI_AGENT_TIMEOUT_SECONDS")
+    candidate: Any = env_value
+    if not candidate and ctx.config_parsed:
+        candidate = ctx.config_parsed.get("agent_timeout_seconds")
+    try:
+        return float(candidate) if candidate is not None else 3600.0
+    except (TypeError, ValueError):
+        return 3600.0
+
+
+@register_check("config_env")
+def _check_config_env(ctx: CheckContext) -> CheckResult:
+    details: dict[str, Any] = {}
+    failures: list[str] = []
+    warnings: list[str] = []
+
+    if ctx.config_parse_error:
+        failures.append(f"config.json: {ctx.config_parse_error}")
+        details["config_parse_error"] = ctx.config_parse_error
+
+    webhook_secret = ctx.env.get("DANI_WEBHOOK_SECRET", "")
+    if not webhook_secret:
+        failures.append("DANI_WEBHOOK_SECRET is unset")
+
+    token, source = resolve_github_token(ctx.env)
+    if token is None:
+        failures.append("no GitHub token (DANI_GITHUB_TOKEN/GITHUB_TOKEN/GH_TOKEN/GITHUB_PAT)")
+
+    runtime = _resolved_agent_runtime(ctx)
+    if runtime not in VALID_AGENT_RUNTIMES:
+        warnings.append(f"unrecognized agent_runtime: {runtime!r}")
+
+    timeout_seconds = _resolved_agent_timeout(ctx)
+    if timeout_seconds <= 0:
+        warnings.append(f"agent_timeout_seconds is non-positive: {timeout_seconds}")
+
+    details.update({
+        "webhook_secret": "<set>" if webhook_secret else "<unset>",
+        "github_token_source": source,
+        "agent_runtime": runtime,
+        "agent_timeout_seconds": timeout_seconds,
+        "config_path_exists": (ctx.data_dir / CONFIG_FILE).exists(),
+    })
+
+    if failures:
+        return CheckResult(
+            name="config_env",
+            status=CheckStatus.FAIL,
+            summary="; ".join(failures),
+            details=details,
+        )
+    if warnings:
+        return CheckResult(
+            name="config_env",
+            status=CheckStatus.WARN,
+            summary="; ".join(warnings),
+            details=details,
+        )
+    return CheckResult(
+        name="config_env",
+        status=CheckStatus.OK,
+        summary="environment + config look healthy",
+        details=details,
+    )
+
+
+def _probe_binary_version(binary: str, *, timeout_seconds: float) -> str:
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=min(2.0, timeout_seconds),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return "unknown"
+    output = (result.stdout or result.stderr or "").strip().splitlines()
+    return cap_str(output[0], limit=100) if output else "unknown"
+
+
+def _binary_record(
+    name: str, *, required: bool, timeout_seconds: float, severity_when_missing: CheckStatus
+) -> dict[str, Any]:
+    import shutil
+
+    path = shutil.which(name)
+    if path is None:
+        return {
+            "name": name,
+            "path": None,
+            "version": None,
+            "required": required,
+            "found": False,
+            "severity": severity_when_missing.value,
+        }
+    return {
+        "name": name,
+        "path": path,
+        "version": _probe_binary_version(name, timeout_seconds=timeout_seconds),
+        "required": required,
+        "found": True,
+        "severity": CheckStatus.OK.value,
+    }
+
+
+@register_check("binaries")
+def _check_binaries(ctx: CheckContext) -> CheckResult:
+    runtime = _resolved_agent_runtime(ctx).lower()
+    has_external_opencode = bool(ctx.env.get("DANI_OPENCODE_SERVER_URL"))
+    records: list[dict[str, Any]] = []
+
+    records.append(
+        _binary_record(
+            "git",
+            required=True,
+            timeout_seconds=ctx.timeout_seconds,
+            severity_when_missing=CheckStatus.FAIL,
+        )
+    )
+    records.append(
+        _binary_record(
+            "gh",
+            required=False,
+            timeout_seconds=ctx.timeout_seconds,
+            severity_when_missing=CheckStatus.WARN,
+        )
+    )
+
+    if runtime in OMX_FAMILY:
+        records.append(
+            _binary_record(
+                "omx",
+                required=True,
+                timeout_seconds=ctx.timeout_seconds,
+                severity_when_missing=CheckStatus.FAIL,
+            )
+        )
+        records.append(
+            _binary_record(
+                "codex",
+                required=False,
+                timeout_seconds=ctx.timeout_seconds,
+                severity_when_missing=CheckStatus.WARN,
+            )
+        )
+    else:
+        records.append({
+            "name": "omx",
+            "found": None,
+            "required": False,
+            "severity": CheckStatus.SKIP.value,
+            "skip_reason": f"agent_runtime={runtime}",
+        })
+
+    if runtime in OMO_FAMILY:
+        if has_external_opencode:
+            records.append({
+                "name": "opencode",
+                "found": None,
+                "required": False,
+                "severity": CheckStatus.SKIP.value,
+                "skip_reason": "DANI_OPENCODE_SERVER_URL set (external server)",
+            })
+        else:
+            records.append(
+                _binary_record(
+                    "opencode",
+                    required=True,
+                    timeout_seconds=ctx.timeout_seconds,
+                    severity_when_missing=CheckStatus.FAIL,
+                )
+            )
+    else:
+        records.append({
+            "name": "opencode",
+            "found": None,
+            "required": False,
+            "severity": CheckStatus.SKIP.value,
+            "skip_reason": f"agent_runtime={runtime}",
+        })
+
+    fails = [r["name"] for r in records if r.get("severity") == "fail"]
+    warns = [r["name"] for r in records if r.get("severity") == "warn"]
+
+    details = {
+        "runtime": runtime,
+        "external_opencode_server": has_external_opencode,
+        "binaries": records,
+    }
+
+    if fails:
+        return CheckResult(
+            name="binaries",
+            status=CheckStatus.FAIL,
+            summary=f"missing required binary: {', '.join(fails)}",
+            details=details,
+        )
+    if warns:
+        return CheckResult(
+            name="binaries",
+            status=CheckStatus.WARN,
+            summary=f"missing advisory binary: {', '.join(warns)}",
+            details=details,
+        )
+    return CheckResult(
+        name="binaries",
+        status=CheckStatus.OK,
+        summary="all required binaries present",
+        details=details,
+    )
+
+
+@register_check("storage_files")
+def _check_storage_files(ctx: CheckContext) -> CheckResult:
+    files_info: list[dict[str, Any]] = []
+    fail_files: list[str] = []
+    warn_files: list[str] = []
+
+    for key, filename in SNAPSHOT_FILES.items():
+        path = ctx.data_dir / filename
+        size = path.stat().st_size if path.exists() else 0
+        error = ctx.snapshot_errors.get(key)
+        record = {
+            "name": filename,
+            "exists": path.exists(),
+            "size_bytes": size,
+            "parsed_ok": error is None and ctx.snapshot.get(key) is not None,
+            "error": error,
+            "required": key in REQUIRED_SNAPSHOT_KEYS,
+        }
+        files_info.append(record)
+        if error and error != "missing":
+            if key in REQUIRED_SNAPSHOT_KEYS:
+                fail_files.append(filename)
+            else:
+                warn_files.append(filename)
+        if error == "missing" and key in REQUIRED_SNAPSHOT_KEYS:
+            warn_files.append(f"{filename}(missing)")
+
+    events_meta = ctx.snapshot.get("events_jsonl_meta", {})
+    events_record = {
+        "name": EVENTS_JSONL,
+        "exists": events_meta.get("exists", False),
+        "size_bytes": events_meta.get("size_bytes", 0),
+        "line_count": events_meta.get("line_count", 0),
+        "first_line_parsed": events_meta.get("first_line_parsed", False),
+        "last_line_parsed": events_meta.get("last_line_parsed", False),
+        "last_line_invalid": events_meta.get("last_line_invalid", False),
+        "error": events_meta.get("error"),
+    }
+    files_info.append(events_record)
+    if events_meta.get("last_line_invalid"):
+        warn_files.append(f"{EVENTS_JSONL}(last_line_invalid)")
+
+    details = {"files": files_info}
+
+    if fail_files:
+        return CheckResult(
+            name="storage_files",
+            status=CheckStatus.FAIL,
+            summary=f"unparsable required storage files: {', '.join(fail_files)}",
+            details=details,
+        )
+    if warn_files:
+        return CheckResult(
+            name="storage_files",
+            status=CheckStatus.WARN,
+            summary=f"storage warnings: {', '.join(warn_files)}",
+            details=details,
+        )
+    return CheckResult(
+        name="storage_files",
+        status=CheckStatus.OK,
+        summary="all storage files exist and parse",
+        details=details,
+    )
+
+
+def _git_branch_exists(repo_path: Path, branch: str, timeout_seconds: float) -> bool:
+    import subprocess
+
+    cmd = ["git", "-C", str(repo_path), "rev-parse", "--verify", "--end-of-options", branch]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=min(3.0, timeout_seconds),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _is_git_worktree(repo_path: Path, timeout_seconds: float) -> bool:
+    import subprocess
+
+    cmd = ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"]
+    try:
+        result = subprocess.run(  # noqa: S603
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=min(3.0, timeout_seconds),
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _inspect_one_repo(repo: dict[str, Any], timeout_seconds: float) -> tuple[dict[str, Any], bool, bool]:
+    full_name = repo.get("full_name", "?")
+    local_path_str = repo.get("local_path", "")
+    enabled = repo.get("enabled", True)
+    local_path = Path(local_path_str) if local_path_str else None
+    errors: list[str] = []
+    is_worktree = False
+    main_branch_ok = False
+    dev_branch_ok = False
+    main_branch = str(repo.get("main_branch", "main"))
+    dev_branch = str(repo.get("dev_branch", "dev"))
+    fail = False
+    warn = False
+
+    if not enabled:
+        record = {
+            "full_name": full_name,
+            "local_path": local_path_str,
+            "enabled": False,
+            "skipped": True,
+        }
+        return record, fail, warn
+
+    if local_path is None or not local_path.exists():
+        errors.append("local_path missing")
+        fail = True
+    else:
+        is_worktree = _is_git_worktree(local_path, timeout_seconds)
+        if not is_worktree:
+            errors.append("not a git working tree")
+            fail = True
+        else:
+            main_branch_ok = _git_branch_exists(local_path, main_branch, timeout_seconds)
+            dev_branch_ok = _git_branch_exists(local_path, dev_branch, timeout_seconds)
+            if not main_branch_ok:
+                errors.append(f"missing branch: {main_branch}")
+                warn = True
+            if not dev_branch_ok:
+                errors.append(f"missing branch: {dev_branch}")
+                warn = True
+
+    record = {
+        "full_name": full_name,
+        "local_path": local_path_str,
+        "exists": local_path.exists() if local_path else False,
+        "is_worktree": is_worktree,
+        "main_branch": main_branch,
+        "main_branch_ok": main_branch_ok,
+        "dev_branch": dev_branch,
+        "dev_branch_ok": dev_branch_ok,
+        "enabled": enabled,
+        "errors": errors,
+    }
+    return record, fail, warn
+
+
+@register_check("registered_repos")
+def _check_registered_repos(ctx: CheckContext) -> CheckResult:
+    registry = ctx.snapshot.get("registry") or {}
+    repos = registry.get("repos", []) if isinstance(registry, dict) else []
+    if not repos:
+        return CheckResult(
+            name="registered_repos",
+            status=CheckStatus.SKIP,
+            summary="no repos registered",
+            details={"count": 0},
+        )
+
+    repo_records: list[dict[str, Any]] = []
+    any_fail = False
+    any_warn = False
+    for repo in repos:
+        if not isinstance(repo, dict):
+            continue
+        record, fail, warn = _inspect_one_repo(repo, ctx.timeout_seconds)
+        repo_records.append(record)
+        any_fail = any_fail or fail
+        any_warn = any_warn or warn
+
+    details = {"count": len(repos), "repos": repo_records}
+    if any_fail:
+        return CheckResult(
+            name="registered_repos",
+            status=CheckStatus.FAIL,
+            summary="one or more repos missing or not a git working tree",
+            details=details,
+        )
+    if any_warn:
+        return CheckResult(
+            name="registered_repos",
+            status=CheckStatus.WARN,
+            summary="one or more repos missing main/dev branch",
+            details=details,
+        )
+    return CheckResult(
+        name="registered_repos",
+        status=CheckStatus.OK,
+        summary=f"{len(repos)} repo(s) healthy",
+        details=details,
+    )
+
+
+@register_check("github_auth")
+def _check_github_auth(ctx: CheckContext) -> CheckResult:
+    token, source = resolve_github_token(ctx.env)
+    if token is None:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.SKIP,
+            summary="no GitHub token available",
+            details={"source": None},
+        )
+    try:
+        from github import Auth, Github  # type: ignore[import-not-found]
+        from github.GithubException import BadCredentialsException, GithubException  # type: ignore[import-not-found]
+    except ImportError as exc:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.WARN,
+            summary=f"PyGithub not importable: {exc}",
+            details={"source": source},
+        )
+
+    try:
+        client = Github(auth=Auth.Token(token), timeout=int(min(ctx.timeout_seconds, 10.0)), per_page=1, retry=None)
+        rate_limit = client.get_rate_limit()
+        core = getattr(rate_limit, "core", None)
+        remaining = getattr(core, "remaining", None) if core else None
+        limit = getattr(core, "limit", None) if core else None
+        reset = getattr(core, "reset", None) if core else None
+        reset_iso = reset.isoformat() if reset is not None else None
+    except BadCredentialsException:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.FAIL,
+            summary="invalid GitHub token (BadCredentials)",
+            details={"source": source},
+        )
+    except GithubException as exc:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.WARN,
+            summary=f"GitHub API error: {cap_str(exc, limit=200)}",
+            details={"source": source},
+        )
+    except Exception as exc:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.WARN,
+            summary=f"GitHub API transient error: {cap_str(exc, limit=200)}",
+            details={"source": source},
+        )
+
+    details = {"source": source, "rate_limit": {"remaining": remaining, "limit": limit, "reset": reset_iso}}
+    if remaining is not None and remaining < 100:
+        return CheckResult(
+            name="github_auth",
+            status=CheckStatus.WARN,
+            summary=f"rate-limit remaining low: {remaining}/{limit}",
+            details=details,
+        )
+    return CheckResult(
+        name="github_auth",
+        status=CheckStatus.OK,
+        summary=f"token ok (rate-limit {remaining}/{limit})",
+        details=details,
+    )
+
+
+def _port_is_listening(port: int) -> bool:
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.5)
+    try:
+        result = sock.connect_ex(("127.0.0.1", port))
+    except OSError:
+        return False
+    finally:
+        sock.close()
+    return result == 0
+
+
+@register_check("server_health")
+def _check_server_health(ctx: CheckContext) -> CheckResult:
+    port = ctx.port
+    listening = _port_is_listening(port)
+    if not listening:
+        return CheckResult(
+            name="server_health",
+            status=CheckStatus.SKIP,
+            summary=f"no local server on 127.0.0.1:{port}",
+            details={"port": port, "listening": False},
+        )
+
+    import time as _time
+    import urllib.error
+    import urllib.request
+
+    url = f"http://127.0.0.1:{port}/health"
+    start = _time.monotonic()
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "dani-doctor"})  # noqa: S310
+        with urllib.request.urlopen(req, timeout=min(2.0, ctx.timeout_seconds)) as resp:  # noqa: S310
+            status_code = resp.status
+            body_bytes = resp.read(4096)
+    except urllib.error.HTTPError as exc:
+        return CheckResult(
+            name="server_health",
+            status=CheckStatus.WARN,
+            summary=f"non-200 from {url}: HTTP {exc.code}",
+            details={
+                "port": port,
+                "listening": True,
+                "likely_not_dani": True,
+                "http_status": exc.code,
+                "checked_url": url,
+            },
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return CheckResult(
+            name="server_health",
+            status=CheckStatus.WARN,
+            summary=f"server probe failed: {cap_str(exc, limit=200)}",
+            details={"port": port, "listening": True, "checked_url": url},
+        )
+    latency_ms = int((_time.monotonic() - start) * 1000)
+    body_text = body_bytes.decode("utf-8", errors="replace")
+    try:
+        body_parsed = json.loads(body_text)
+    except json.JSONDecodeError:
+        body_parsed = None
+    if status_code == 200 and body_parsed == {"status": "ok"}:
+        return CheckResult(
+            name="server_health",
+            status=CheckStatus.OK,
+            summary=f"healthy ({latency_ms}ms)",
+            details={
+                "port": port,
+                "listening": True,
+                "http_status": 200,
+                "latency_ms": latency_ms,
+                "checked_url": url,
+            },
+        )
+    return CheckResult(
+        name="server_health",
+        status=CheckStatus.WARN,
+        summary="200 but body does not match dani /health shape",
+        details={
+            "port": port,
+            "listening": True,
+            "likely_not_dani": True,
+            "http_status": status_code,
+            "body_preview": cap_str(body_text, limit=200),
+            "checked_url": url,
+            "latency_ms": latency_ms,
+        },
+    )
+
+
+_ACTIVE_JOB_STATUSES = frozenset({"queued", "launched", "retrying", "recovering"})
+
+
+@register_check("stuck_jobs")
+def _check_stuck_jobs(ctx: CheckContext) -> CheckResult:
+    jobs_payload = ctx.snapshot.get("jobs") or {}
+    jobs = jobs_payload.get("jobs", []) if isinstance(jobs_payload, dict) else []
+    threshold_s = ctx.thresholds.get("stuck_job_age_seconds")
+    if threshold_s is None:
+        threshold_s = int(_resolved_agent_timeout(ctx))
+
+    stuck: list[dict[str, Any]] = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") not in _ACTIVE_JOB_STATUSES:
+            continue
+        updated = safe_iso_parse(job.get("updated_at") or job.get("created_at"))
+        if updated is None:
+            continue
+        age_s = (ctx.now_utc - updated).total_seconds()
+        if age_s <= threshold_s:
+            continue
+        stuck.append({
+            "job_id": job.get("id"),
+            "repo": job.get("repo_full_name"),
+            "stage": job.get("stage"),
+            "status": job.get("status"),
+            "age_seconds": int(age_s),
+            "updated_at": job.get("updated_at"),
+            "issue_number": job.get("issue_number"),
+            "pr_number": job.get("pr_number"),
+        })
+
+    capped, overflow = cap_list(stuck, limit=20)
+    details = {
+        "threshold_seconds": threshold_s,
+        "stuck_count": len(stuck),
+        "stuck": capped,
+        "overflow": overflow,
+    }
+    if not stuck:
+        return CheckResult(
+            name="stuck_jobs",
+            status=CheckStatus.OK,
+            summary="no stuck active jobs",
+            details=details,
+        )
+    return CheckResult(
+        name="stuck_jobs",
+        status=CheckStatus.WARN,
+        summary=f"{len(stuck)} active job(s) older than {threshold_s}s",
+        details=details,
+    )
+
+
+_DRIFT_GRACE_SECONDS = 60
+
+
+def _classify_sessions(
+    sessions: list[Any],
+    job_by_id: dict[str, dict[str, Any]],
+    now_utc: datetime,
+    long_running_threshold_s: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    drift: list[dict[str, Any]] = []
+    long_running: list[dict[str, Any]] = []
+    orphans: list[dict[str, Any]] = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        if session.get("status") != "launched":
+            continue
+        updated = safe_iso_parse(session.get("updated_at") or session.get("created_at"))
+        age_s = (now_utc - updated).total_seconds() if updated else None
+        job_id = session.get("job_id")
+        job = job_by_id.get(job_id) if isinstance(job_id, str) else None
+        entry = {
+            "session_id": session.get("id"),
+            "job_id": job_id,
+            "repo": session.get("repo_full_name"),
+            "stage": session.get("stage"),
+            "session_status": session.get("status"),
+            "job_status": job.get("status") if job else None,
+            "age_seconds": int(age_s) if age_s is not None else None,
+        }
+        if job is None:
+            orphans.append(entry)
+            continue
+        if job.get("status") in TERMINAL_JOB_STATUSES:
+            if age_s is None or age_s >= _DRIFT_GRACE_SECONDS:
+                drift.append(entry)
+            continue
+        if age_s is not None and age_s > long_running_threshold_s:
+            long_running.append(entry)
+    return drift, long_running, orphans
+
+
+@register_check("stuck_sessions")
+def _check_stuck_sessions(ctx: CheckContext) -> CheckResult:
+    jobs_payload = ctx.snapshot.get("jobs") or {}
+    sessions_payload = ctx.snapshot.get("sessions") or {}
+    jobs = jobs_payload.get("jobs", []) if isinstance(jobs_payload, dict) else []
+    sessions = sessions_payload.get("sessions", []) if isinstance(sessions_payload, dict) else []
+
+    job_by_id: dict[str, dict[str, Any]] = {
+        j["id"]: j for j in jobs if isinstance(j, dict) and isinstance(j.get("id"), str)
+    }
+
+    long_running_threshold_s = max(int(_resolved_agent_timeout(ctx)), 86400)
+    drift, long_running, orphans = _classify_sessions(sessions, job_by_id, ctx.now_utc, long_running_threshold_s)
+
+    if drift:
+        time.sleep(0.1)
+        snap2, _errs2 = read_only_snapshot(ctx.data_dir, retry_delay_s=0.0)
+        jobs_payload2 = snap2.get("jobs") or {}
+        sessions_payload2 = snap2.get("sessions") or {}
+        jobs2 = jobs_payload2.get("jobs", []) if isinstance(jobs_payload2, dict) else []
+        sessions2 = sessions_payload2.get("sessions", []) if isinstance(sessions_payload2, dict) else []
+        job_by_id2: dict[str, dict[str, Any]] = {
+            j["id"]: j for j in jobs2 if isinstance(j, dict) and isinstance(j.get("id"), str)
+        }
+        drift2, _, _ = _classify_sessions(
+            sessions2, job_by_id2, datetime.now(tz=timezone.utc), long_running_threshold_s
+        )
+        confirmed_ids = {d["session_id"] for d in drift2}
+        drift = [d for d in drift if d["session_id"] in confirmed_ids]
+
+    drift_capped, drift_overflow = cap_list(drift, limit=50)
+    lr_capped, lr_overflow = cap_list(long_running, limit=50)
+    orph_capped, orph_overflow = cap_list(orphans, limit=50)
+    details: dict[str, Any] = {
+        "drift": drift_capped,
+        "drift_overflow": drift_overflow,
+        "long_running": lr_capped,
+        "long_running_overflow": lr_overflow,
+        "orphans": orph_capped,
+        "orphans_overflow": orph_overflow,
+        "long_running_threshold_seconds": long_running_threshold_s,
+        "recommendation": (
+            "Review listed session_id/job_id pairs. If confirmed stale, stop dani serve "
+            "before any manual state edit, or wait for a future repair command."
+        ),
+    }
+
+    if drift:
+        return CheckResult(
+            name="stuck_sessions",
+            status=CheckStatus.FAIL,
+            summary=f"{len(drift)} session(s) launched while job is terminal (drift)",
+            details=details,
+        )
+    if long_running or orphans:
+        return CheckResult(
+            name="stuck_sessions",
+            status=CheckStatus.WARN,
+            summary=(f"{len(long_running)} long-running, {len(orphans)} orphan launched session(s)"),
+            details=details,
+        )
+    return CheckResult(
+        name="stuck_sessions",
+        status=CheckStatus.OK,
+        summary="no stuck launched sessions",
+        details=details,
+    )
+
+
+_DEFAULT_DISK_THRESHOLDS: dict[str, int] = {
+    "jobs_bytes_warn": 50 * 1024 * 1024,
+    "jobs_bytes_fail": 200 * 1024 * 1024,
+    "sessions_bytes_warn": 20 * 1024 * 1024,
+    "sessions_bytes_fail": 100 * 1024 * 1024,
+    "events_bytes_warn": 100 * 1024 * 1024,
+    "runs_bytes_warn": 5 * 1024 * 1024 * 1024,
+    "runs_bytes_fail": 20 * 1024 * 1024 * 1024,
+}
+
+
+def _walk_runs_size(runs_dir: Path, deadline_s: float) -> tuple[int, bool]:
+    if not runs_dir.exists():
+        return 0, False
+    total = 0
+    truncated = False
+    start = time.monotonic()
+    for root, _dirs, files in os.walk(runs_dir):
+        if (time.monotonic() - start) > deadline_s:
+            truncated = True
+            break
+        for filename in files:
+            try:
+                total += os.path.getsize(os.path.join(root, filename))
+            except OSError:
+                continue
+    return total, truncated
+
+
+def _verdict_for_size(size: int, warn: int, fail: int) -> str:
+    if size > fail:
+        return "fail"
+    if size > warn:
+        return "warn"
+    return "ok"
+
+
+@register_check("disk_usage")
+def _check_disk_usage(ctx: CheckContext) -> CheckResult:
+    thresholds = {**_DEFAULT_DISK_THRESHOLDS, **ctx.thresholds}
+    records: list[dict[str, Any]] = []
+    overall_fail = False
+    overall_warn = False
+
+    file_specs: list[tuple[str, str, int, int]] = [
+        ("jobs.json", "jobs", thresholds["jobs_bytes_warn"], thresholds["jobs_bytes_fail"]),
+        ("sessions.json", "sessions", thresholds["sessions_bytes_warn"], thresholds["sessions_bytes_fail"]),
+        ("events.jsonl", "events", thresholds["events_bytes_warn"], thresholds["events_bytes_warn"]),
+        ("processed-events.json", "processed_events", thresholds["jobs_bytes_warn"], thresholds["jobs_bytes_fail"]),
+        ("terminal-targets.json", "terminal_targets", thresholds["jobs_bytes_warn"], thresholds["jobs_bytes_fail"]),
+    ]
+    for filename, key, warn, fail in file_specs:
+        path = ctx.data_dir / filename
+        size = path.stat().st_size if path.exists() else 0
+        verdict = _verdict_for_size(size, warn, fail)
+        records.append({"name": filename, "key": key, "bytes": size, "warn": warn, "fail": fail, "verdict": verdict})
+        if verdict == "fail":
+            overall_fail = True
+        elif verdict == "warn":
+            overall_warn = True
+
+    runs_deadline = min(30.0, max(ctx.timeout_seconds * 6.0, 5.0))
+    runs_dir = ctx.data_dir / "runs"
+    runs_size, truncated = _walk_runs_size(runs_dir, runs_deadline)
+    runs_verdict = _verdict_for_size(runs_size, thresholds["runs_bytes_warn"], thresholds["runs_bytes_fail"])
+    if truncated:
+        runs_verdict = "warn" if runs_verdict == "ok" else runs_verdict
+        overall_warn = True
+    if runs_verdict == "fail":
+        overall_fail = True
+    elif runs_verdict == "warn":
+        overall_warn = True
+    records.append({
+        "name": "runs/",
+        "key": "runs",
+        "bytes": runs_size,
+        "warn": thresholds["runs_bytes_warn"],
+        "fail": thresholds["runs_bytes_fail"],
+        "verdict": runs_verdict,
+        "truncated": truncated,
+        "deadline_seconds": runs_deadline,
+    })
+
+    details = {"records": records, "thresholds": thresholds}
+    if overall_fail:
+        return CheckResult(
+            name="disk_usage",
+            status=CheckStatus.FAIL,
+            summary="one or more storage targets exceed fail threshold",
+            details=details,
+        )
+    if overall_warn:
+        return CheckResult(
+            name="disk_usage",
+            status=CheckStatus.WARN,
+            summary="one or more storage targets exceed warn threshold",
+            details=details,
+        )
+    return CheckResult(
+        name="disk_usage",
+        status=CheckStatus.OK,
+        summary="storage usage healthy",
+        details=details,
+    )
+
+
+_DEFAULT_BACKUP_THRESHOLDS: dict[str, int] = {
+    "backup_count_warn": 3,
+    "backup_age_days_warn": 14,
+    "backup_bytes_warn": 20 * 1024 * 1024,
+}
+
+
+@register_check("backup_files")
+def _check_backup_files(ctx: CheckContext) -> CheckResult:
+    thresholds = {**_DEFAULT_BACKUP_THRESHOLDS, **ctx.thresholds}
+    candidates = sorted(ctx.data_dir.glob("*.bak.*"))
+    items: list[dict[str, Any]] = []
+    total_bytes = 0
+    oldest_mtime: float | None = None
+    for path in candidates:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        total_bytes += stat.st_size
+        if oldest_mtime is None or stat.st_mtime < oldest_mtime:
+            oldest_mtime = stat.st_mtime
+        items.append({
+            "name": path.name,
+            "size_bytes": stat.st_size,
+            "mtime_iso": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "age_days": (ctx.now_utc.timestamp() - stat.st_mtime) / 86400.0,
+        })
+
+    oldest_age_days = (ctx.now_utc.timestamp() - oldest_mtime) / 86400.0 if oldest_mtime is not None else 0.0
+    capped, overflow = cap_list(items, limit=20)
+    details = {
+        "count": len(items),
+        "total_bytes": total_bytes,
+        "oldest_age_days": oldest_age_days,
+        "files": capped,
+        "overflow": overflow,
+        "thresholds": thresholds,
+    }
+    reasons: list[str] = []
+    if len(items) > thresholds["backup_count_warn"]:
+        reasons.append(f"count {len(items)} > {thresholds['backup_count_warn']}")
+    if oldest_age_days > thresholds["backup_age_days_warn"]:
+        reasons.append(f"oldest {oldest_age_days:.1f}d > {thresholds['backup_age_days_warn']}d")
+    if total_bytes > thresholds["backup_bytes_warn"]:
+        reasons.append(f"total {total_bytes}B > {thresholds['backup_bytes_warn']}B")
+    if reasons:
+        return CheckResult(
+            name="backup_files",
+            status=CheckStatus.WARN,
+            summary="; ".join(reasons),
+            details=details,
+        )
+    return CheckResult(
+        name="backup_files",
+        status=CheckStatus.OK,
+        summary="no concerning backup accumulation",
+        details=details,
+    )
+
+
+def _ps_run(args: list[str], *, timeout_s: float) -> tuple[int, list[str]]:
+    import subprocess
+
+    try:
+        result = subprocess.run(  # noqa: S603
+            args, capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return -1, []
+    if result.returncode != 0:
+        return result.returncode, []
+    return 0, result.stdout.splitlines()
+
+
+def _classify_ps_command(command: str) -> str | None:
+    if "omx exec" in command:
+        return "omx_exec"
+    if "opencode serve" in command:
+        return "opencode_serve"
+    if "opencode run" in command:
+        return "opencode_run"
+    return None
+
+
+@register_check("process_sprawl")
+def _check_process_sprawl(ctx: CheckContext) -> CheckResult:
+    threshold = ctx.thresholds.get("process_sprawl_count_warn", 20)
+    timeout_s = min(3.0, ctx.timeout_seconds)
+    rc, lines = _ps_run(["ps", "-axo", "pid=,ppid=,etime="], timeout_s=timeout_s)
+    if rc != 0:
+        return CheckResult(
+            name="process_sprawl",
+            status=CheckStatus.SKIP,
+            summary="ps unavailable or failed",
+            details={"reason": "ps_failed"},
+        )
+
+    pid_records: list[tuple[str, str, str]] = []
+    for line in lines:
+        parts = line.split(None, 2)
+        if len(parts) >= 3:
+            pid_records.append((parts[0].strip(), parts[1].strip(), parts[2].strip()))
+
+    classifier_counts: dict[str, int] = {"omx_exec": 0, "opencode_serve": 0, "opencode_run": 0}
+    samples: list[dict[str, Any]] = []
+    sample_cap = 10
+
+    for pid, ppid, etime in pid_records:
+        if not pid.isdigit():
+            continue
+        rc2, cmd_lines = _ps_run(["ps", "-p", pid, "-o", "command="], timeout_s=min(1.0, timeout_s))
+        if rc2 != 0 or not cmd_lines:
+            continue
+        classifier = _classify_ps_command(cmd_lines[0])
+        if classifier is None:
+            continue
+        classifier_counts[classifier] = classifier_counts.get(classifier, 0) + 1
+        if len(samples) < sample_cap:
+            samples.append({"pid": pid, "ppid": ppid, "etime": etime, "classifier": classifier})
+
+    total = sum(classifier_counts.values())
+    details = {
+        "counts": classifier_counts,
+        "sample": samples,
+        "threshold": threshold,
+    }
+    if total > threshold:
+        return CheckResult(
+            name="process_sprawl",
+            status=CheckStatus.WARN,
+            summary=f"{total} agent process(es) running (threshold {threshold})",
+            details=details,
+        )
+    return CheckResult(
+        name="process_sprawl",
+        status=CheckStatus.OK,
+        summary=f"{total} agent process(es) running",
+        details=details,
+    )
