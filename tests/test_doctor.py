@@ -38,7 +38,6 @@ from dani.doctor import (
 @pytest.fixture(autouse=True)
 def _clean_registry():
     saved = dict(CHECK_REGISTRY)
-    CHECK_REGISTRY.clear()
     yield
     CHECK_REGISTRY.clear()
     CHECK_REGISTRY.update(saved)
@@ -78,7 +77,7 @@ def test_registry_duplicate_name_raises():
 
 
 def test_run_doctor_empty_returns_ok(tmp_path: Path):
-    report = run_doctor(tmp_path)
+    report = run_doctor(tmp_path, check_names=[])
     assert isinstance(report, DoctorReport)
     assert report.overall_status == CheckStatus.OK
     assert report.results == []
@@ -414,7 +413,8 @@ def test_cli_doctor_empty_data_dir_runs_clean(tmp_path: Path):
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["schema_version"] == 1
-    assert payload["overall_status"] in {"ok", "skip"}
+    assert payload["overall_status"] in {"ok", "warn", "skip"}
+    assert payload["summary"]["fail"] == 0
 
 
 def test_allowed_threshold_keys_is_frozenset():
@@ -1026,3 +1026,240 @@ def test_process_sprawl_warn_over_threshold(tmp_path: Path, monkeypatch: pytest.
     for sample in result.details["sample"]:
         assert "command" not in sample
         assert "argv" not in sample
+
+
+# ============================================================
+# W7: end-to-end + exit code matrix
+# ============================================================
+
+
+def test_e2e_happy_path_runs_all_checks(populated_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_paths = {
+        "git": "/usr/bin/git",
+        "gh": "/usr/bin/gh",
+        "omx": "/usr/bin/omx",
+        "codex": "/usr/bin/codex",
+    }
+    monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+
+    class FakeCore:
+        remaining = 4000
+        limit = 5000
+        reset = datetime.now(tz=timezone.utc)
+
+    class FakeRate:
+        core = FakeCore()
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            return FakeRate()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+
+    runner = CliRunner()
+    env = {
+        "DANI_WEBHOOK_SECRET": "secret",
+        "DANI_GITHUB_TOKEN": "tok",
+        "DANI_AGENT_RUNTIME": "omx",
+    }
+    result = runner.invoke(app, ["doctor", "--data-dir", str(populated_data_dir), "--json"], env=env)
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["overall_status"] in {"ok", "warn"}
+    assert payload["summary"]["fail"] == 0
+    names = {r["name"] for r in payload["results"]}
+    expected = {
+        "config_env",
+        "binaries",
+        "storage_files",
+        "registered_repos",
+        "github_auth",
+        "server_health",
+        "stuck_jobs",
+        "stuck_sessions",
+        "disk_usage",
+        "backup_files",
+        "process_sprawl",
+    }
+    assert expected.issubset(names)
+
+
+def test_e2e_failure_mode_drift_exits_2(populated_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    now = datetime.now(tz=timezone.utc)
+    old = (now - timedelta(hours=10)).isoformat()
+    (populated_data_dir / "jobs.json").write_text(
+        json.dumps({
+            "jobs": [
+                {
+                    "id": "j1",
+                    "status": "completed",
+                    "stage": "implementation",
+                    "repo_full_name": "x/y",
+                    "updated_at": old,
+                    "created_at": old,
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    (populated_data_dir / "sessions.json").write_text(
+        json.dumps({
+            "sessions": [
+                {
+                    "id": "s1",
+                    "status": "launched",
+                    "stage": "implementation",
+                    "repo_full_name": "x/y",
+                    "job_id": "j1",
+                    "updated_at": old,
+                    "created_at": old,
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            class C:
+                remaining = 4000
+                limit = 5000
+                reset = datetime.now(tz=timezone.utc)
+
+            class R:
+                core = C()
+
+            return R()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+
+    runner = CliRunner()
+    env = {"DANI_WEBHOOK_SECRET": "x", "DANI_GITHUB_TOKEN": "y"}
+    result = runner.invoke(
+        app,
+        ["doctor", "--data-dir", str(populated_data_dir), "--check", "stuck_sessions", "--json"],
+        env=env,
+    )
+    assert result.exit_code == 2
+    payload = json.loads(result.output)
+    assert payload["overall_status"] == "fail"
+    stuck = payload["results"][0]
+    assert stuck["name"] == "stuck_sessions"
+    assert stuck["status"] == "fail"
+    assert len(stuck["details"]["drift"]) == 1
+
+
+def test_e2e_strict_warn_exits_1(populated_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    for i in range(5):
+        (populated_data_dir / f"jobs.json.bak.{i}").write_text("x", encoding="utf-8")
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            class C:
+                remaining = 4000
+                limit = 5000
+                reset = datetime.now(tz=timezone.utc)
+
+            class R:
+                core = C()
+
+            return R()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    runner = CliRunner()
+    env = {"DANI_WEBHOOK_SECRET": "x", "DANI_GITHUB_TOKEN": "y"}
+    result = runner.invoke(
+        app,
+        ["doctor", "--data-dir", str(populated_data_dir), "--check", "backup_files", "--strict"],
+        env=env,
+    )
+    assert result.exit_code == 1
+
+
+def test_e2e_text_output_renders(populated_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    runner = CliRunner()
+    env = {"DANI_WEBHOOK_SECRET": "x", "DANI_GITHUB_TOKEN": "y", "NO_COLOR": "1"}
+    result = runner.invoke(
+        app,
+        ["doctor", "--data-dir", str(populated_data_dir), "--check", "config_env"],
+        env=env,
+    )
+    assert result.exit_code == 0
+    assert "config_env" in result.output
+    assert "\x1b" not in result.output
+
+
+def test_e2e_exit_code_matrix_parametrized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+
+    runner = CliRunner()
+    cases = [
+        ([], 0),
+        (["--strict"], 0),
+    ]
+    for cli_args, expected_exit in cases:
+        result = runner.invoke(
+            app,
+            ["doctor", "--data-dir", str(tmp_path), "--check", "process_sprawl", *cli_args],
+            env={},
+        )
+        assert result.exit_code == expected_exit, (cli_args, result.output)
+
+
+def test_e2e_no_token_in_output(populated_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    ULTRA_SECRET = "ghp_THIS_MUST_NEVER_APPEAR_IN_OUTPUT_99999"
+    WEBHOOK_SECRET = "this-webhook-secret-must-never-appear-12345"
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
+    monkeypatch.setattr("dani.doctor._ps_run", lambda *a, **kw: (0, []))
+
+    class FakeGithub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_rate_limit(self):
+            class C:
+                remaining = 4000
+                limit = 5000
+                reset = datetime.now(tz=timezone.utc)
+
+            class R:
+                core = C()
+
+            return R()
+
+    monkeypatch.setattr("github.Github", FakeGithub)
+    runner = CliRunner()
+    env = {"DANI_WEBHOOK_SECRET": WEBHOOK_SECRET, "DANI_GITHUB_TOKEN": ULTRA_SECRET}
+    result = runner.invoke(
+        app,
+        ["doctor", "--data-dir", str(populated_data_dir), "--json", "--verbose"],
+        env=env,
+    )
+    assert result.exit_code in (0, 1, 2)
+    assert ULTRA_SECRET not in result.output
+    assert WEBHOOK_SECRET not in result.output
