@@ -805,6 +805,120 @@ def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(t
     assert "Earlier dani reply" in prompt
 
 
+def test_restart_issue_transitions_orphan_session_to_failed(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.queue_manager.submit = lambda job: None  # type: ignore[assignment]
+    stale_job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=77,
+        status="completed",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(stale_job)
+    orphan_session = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-orphan",
+        prompt_path=str(tmp_path / "prompt.txt"),
+        script_path=str(tmp_path / "run.sh"),
+        worktree_path=str(tmp_path),
+        job_id=stale_job.id,
+        issue_number=77,
+        status="launched",
+    )
+    service.storage.create_session(orphan_session)
+    service.storage.update_job(stale_job.id, session_id=orphan_session.id)
+
+    service.restart_issue("acme/demo", 77)
+
+    refreshed = next(s for s in service.storage.list_sessions() if s.id == orphan_session.id)
+    assert refreshed.status == "failed"
+    assert refreshed.termination_reason == "superseded_by_restart_issue"
+    assert refreshed.ended_at is not None
+
+
+def test_rehydrate_requeues_launched_job_and_transitions_orphan_session(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=88,
+        status="launched",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(job)
+    orphan = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-orphan",
+        prompt_path=str(tmp_path / "p.txt"),
+        script_path=str(tmp_path / "r.sh"),
+        worktree_path=str(tmp_path),
+        job_id=job.id,
+        issue_number=88,
+        status="launched",
+    )
+    service.storage.create_session(orphan)
+    service.storage.update_job(job.id, session_id=orphan.id)
+
+    rebuilt = DaniService(
+        service.config,
+        storage=service.storage,
+        github=cast(GitHubCLI, github),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    rebuilt.queue_manager.join_all()
+
+    refreshed_session = next(s for s in service.storage.list_sessions() if s.id == orphan.id)
+    assert refreshed_session.status in {"completed", "failed"}
+    assert refreshed_session.ended_at is not None
+
+
+def test_rehydrate_reconciles_drift_at_startup(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    terminal_job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=200,
+        status="completed",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(terminal_job)
+    drift_session = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-drift",
+        prompt_path=str(tmp_path / "p.txt"),
+        script_path=str(tmp_path / "r.sh"),
+        worktree_path=str(tmp_path),
+        job_id=terminal_job.id,
+        issue_number=200,
+        status="launched",
+    )
+    service.storage.create_session(drift_session)
+
+    DaniService(
+        service.config,
+        storage=service.storage,
+        github=cast(GitHubCLI, FakeGitHubCLI()),
+        omx_runner=cast(AgentRunner, FakeOmxRunner(FakeGitHubCLI())),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+
+    reconciled = next(s for s in service.storage.list_sessions() if s.id == drift_session.id)
+    assert reconciled.status == "completed"
+    assert reconciled.termination_reason == "startup_drift_reconciled_from_completed"
+    assert reconciled.ended_at is not None
+
+
+def test_reconcile_orphan_session_handles_missing_session_id(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service._reconcile_orphan_session(None, new_status="failed", reason="x")
+    service._reconcile_orphan_session("does-not-exist", new_status="failed", reason="x")
+
+
 def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
     service, _, omx_runner = make_service(tmp_path)
     service.handle_event(

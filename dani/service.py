@@ -86,7 +86,13 @@ class DaniService:
         self._rehydrate_pending_jobs()
 
     def _rehydrate_pending_jobs(self) -> None:
-        """Submit durable pending jobs that survived a Dani process restart."""
+        """Submit durable pending jobs that survived a Dani process restart.
+
+        Also reconciles orphan sessions: any session.status == "launched" whose
+        linked job is terminal (or whose linked job we are about to re-queue)
+        is transitioned out of "launched" so it never reappears as drift in
+        future doctor / monitoring runs.
+        """
         for job in self.storage.list_jobs():
             if job.status in {"queued", "retrying"}:
                 self.queue_manager.submit(job)
@@ -109,6 +115,9 @@ class DaniService:
                                 "note": "side_effect_already_posted",
                             },
                         )
+                        self._reconcile_orphan_session(
+                            job.session_id, new_status="completed", reason="recovered_after_restart"
+                        )
                         continue
                 recovered = self.storage.update_job(
                     job.id,
@@ -120,7 +129,63 @@ class DaniService:
                         "recovered_at": utc_now(),
                     },
                 )
+                self._reconcile_orphan_session(job.session_id, new_status="failed", reason="superseded_by_rehydration")
                 self.queue_manager.submit(recovered)
+
+        self._reconcile_drift_sessions_on_startup()
+
+    def _reconcile_orphan_session(self, session_id: str | None, *, new_status: str, reason: str) -> None:
+        """Transition a single session out of 'launched' state.
+
+        Safe to call with a missing or None session_id (no-op). Used by
+        startup rehydration and by job-level supersede paths so the
+        session record never lingers as 'launched' once its owning job
+        has reached a terminal state.
+        """
+
+        if not session_id:
+            return
+        try:
+            self.storage.update_session(
+                session_id,
+                status=new_status,
+                ended_at=utc_now(),
+                termination_reason=reason,
+            )
+        except KeyError:
+            return
+
+    def _reconcile_drift_sessions_on_startup(self) -> None:
+        """Catch any remaining session.launched whose job is already terminal.
+
+        A previous Dani process can crash *between* updating the session row
+        and updating the job row. This sweep, run once at startup, closes
+        that small window by detecting drift (session.status == 'launched'
+        AND linked job.status in {completed, failed, superseded}) and
+        transitioning the session to match the job's terminal outcome.
+        """
+
+        try:
+            sessions = self.storage.list_sessions()
+            jobs = self.storage.list_jobs()
+        except Exception:
+            return
+        job_by_id = {j.id: j for j in jobs}
+        terminal = {"completed", "failed", "superseded"}
+        job_to_session_status = {"completed": "completed", "failed": "failed", "superseded": "failed"}
+        for session in sessions:
+            if session.status != "launched":
+                continue
+            job = job_by_id.get(session.job_id) if session.job_id else None
+            if job is None:
+                continue
+            if job.status not in terminal:
+                continue
+            self._reconcile_orphan_session(
+                session.id,
+                new_status=job_to_session_status[job.status],
+                reason=f"startup_drift_reconciled_from_{job.status}",
+            )
 
     def register_repo(
         self, full_name: str, local_path: str, main_branch: str = "main", dev_branch: str = "dev"
@@ -166,6 +231,7 @@ class DaniService:
 
         for job in self.storage.find_jobs(repo_full_name=repo_full_name, issue_number=issue_number):
             self.storage.update_job(job.id, status="superseded")
+            self._reconcile_orphan_session(job.session_id, new_status="failed", reason="superseded_by_restart_issue")
 
         issue_metadata = self._issue_metadata(repo_full_name, issue_number)
         return self._enqueue_job(
