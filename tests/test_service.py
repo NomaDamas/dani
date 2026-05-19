@@ -584,6 +584,87 @@ def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> 
         service._verify_side_effect(repo, job)
 
 
+def test_issue_followup_verification_prunes_duplicate_signatures(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=267)
+    signature = build_signature(stage="issue_followup", job=job.id, issue=267)
+    for _ in range(5):
+        github.add_issue_signature("acme/demo", 267, signature)
+    initial_comments = github.issue_comments("acme/demo", 267)
+    assert len(initial_comments) == 5
+    earliest_id = initial_comments[0]["id"]
+    duplicate_ids = [comment["id"] for comment in initial_comments[1:]]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 267)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
+    assert sorted(comment_id for _repo, comment_id in github.deleted_issue_comment_ids) == sorted(duplicate_ids)
+    prunes = job.metadata.get("duplicate_signature_prunes")
+    assert prunes and prunes[-1]["duplicate_count"] == 4
+    assert prunes[-1]["kept_comment_id"] == earliest_id
+
+
+def test_issue_request_verification_prunes_duplicate_signatures(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=42)
+    signature = build_signature(stage="issue_request", job=job.id, issue=42)
+    for _ in range(3):
+        github.add_issue_signature("acme/demo", 42, signature)
+    earliest_id = github.issue_comments("acme/demo", 42)[0]["id"]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 42)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
+
+
+def test_issue_followup_verification_keeps_single_signature_untouched(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=99)
+    signature = build_signature(stage="issue_followup", job=job.id, issue=99)
+    github.add_issue_signature("acme/demo", 99, signature)
+
+    service._verify_side_effect(repo, job)
+
+    assert len(github.issue_comments("acme/demo", 99)) == 1
+    assert github.deleted_issue_comment_ids == []
+    assert "duplicate_signature_prunes" not in job.metadata
+
+
+def test_issue_comment_recovery_verification_prunes_duplicate_recovery_comments(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    expected_signature = build_signature(stage="issue_followup", job="source-job-id", issue=55)
+    job = JobRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_followup_recovery",
+        issue_number=55,
+        metadata={
+            "expected_signature": expected_signature,
+            "original_error": "issue-followup-comment-missing",
+        },
+    )
+    for _ in range(4):
+        github.add_issue_signature("acme/demo", 55, expected_signature)
+    earliest_id = github.issue_comments("acme/demo", 55)[0]["id"]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 55)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
+
+
 def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warning(tmp_path: Path) -> None:
     service, github, omx_runner = make_service(tmp_path)
     service.handle_event(
