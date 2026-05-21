@@ -1657,6 +1657,17 @@ class DaniService:
             f"Original job id: {source_job_id}\n"
             f"Original stage: {original_stage}\n"
             f"Required exact Dani signature:\n{expected_signature}\n\n"
+            "POST EXACTLY ONCE. Strict anti-duplicate contract:\n"
+            "- Before calling `gh issue comment`, run:\n"
+            f"  gh issue view {issue_number} --repo {repo.full_name} --json comments --jq '.comments[].body' "
+            f"| grep -F '{expected_signature}' || true\n"
+            "  If that command prints anything non-empty, the recovery comment already exists. DO NOT post again. "
+            "Exit immediately.\n"
+            "- Call `gh issue comment` at most ONE time in this session.\n"
+            "- After `gh issue comment` returns successfully, do not run it again — not for retries, not for "
+            "self-review, not for 'double-checking'. Exit.\n"
+            "- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. "
+            "If the signature is already present, the post succeeded; do not retry; exit.\n\n"
             "Post it with gh (write the comment to a file first, then send it):\n"
             f"gh issue comment {issue_number} --repo {repo.full_name} --body-file <recovery-comment.md>\n\n"
             "After posting the comment, exit."
@@ -1764,21 +1775,36 @@ class DaniService:
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = build_signature(stage="issue_request", job=job.id, issue=int(job.issue_number or 0))
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            raise RuntimeError("issue-request-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error="issue-request-comment-missing",
+            job=job,
+        )
 
     def _verify_issue_followup_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            raise RuntimeError("issue-followup-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error="issue-followup-comment-missing",
+            job=job,
+        )
 
     def _verify_issue_comment_recovery_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = str(job.metadata.get("expected_signature") or "")
         if not signature:
             raise RuntimeError("issue-comment-recovery-missing-signature")
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            original_error = str(job.metadata.get("original_error") or "issue-comment-missing")
-            raise RuntimeError(original_error)
+        original_error = str(job.metadata.get("original_error") or "issue-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error=original_error,
+            job=job,
+        )
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature_fields: dict[str, int | str] = {
@@ -1865,6 +1891,70 @@ class DaniService:
                 repo_full_name, issue_number, kind="issue", signature_fragment=signature
             )
         )
+
+    def _ensure_single_issue_signature_comment(
+        self,
+        repo_full_name: str,
+        issue_number: int,
+        signature: str,
+        *,
+        missing_error: str,
+        job: JobRecord | None = None,
+    ) -> None:
+        comments = self.github.find_comments_by_signature(
+            repo_full_name, issue_number, kind="issue", signature_fragment=signature
+        )
+        if not comments:
+            raise RuntimeError(missing_error)
+        if len(comments) <= 1:
+            return
+        ordered = sorted(comments, key=lambda comment: str(comment.get("created_at") or ""))
+        keeper = ordered[0]
+        duplicates = ordered[1:]
+        deleted_ids: list[int] = []
+        failed_ids: list[int] = []
+        for duplicate in duplicates:
+            comment_id = duplicate.get("id")
+            if not isinstance(comment_id, int):
+                continue
+            try:
+                if self.github.delete_issue_comment(repo_full_name, comment_id):
+                    deleted_ids.append(comment_id)
+            except Exception:
+                failed_ids.append(comment_id)
+                logger.warning(
+                    "duplicate_signature_comment_delete_failed",
+                    extra={
+                        "repo_full_name": repo_full_name,
+                        "issue_number": issue_number,
+                        "comment_id": comment_id,
+                        "signature": signature,
+                    },
+                    exc_info=True,
+                )
+        logger.warning(
+            "duplicate_signature_comments_pruned",
+            extra={
+                "repo_full_name": repo_full_name,
+                "issue_number": issue_number,
+                "signature": signature,
+                "kept_comment_id": keeper.get("id"),
+                "duplicate_count": len(duplicates),
+                "deleted_comment_ids": deleted_ids,
+                "failed_comment_ids": failed_ids,
+                "job_id": job.id if job is not None else None,
+            },
+        )
+        if job is not None:
+            note = {
+                "duplicate_count": len(duplicates),
+                "deleted_comment_ids": deleted_ids,
+                "failed_comment_ids": failed_ids,
+                "kept_comment_id": keeper.get("id"),
+            }
+            history = list(job.metadata.get("duplicate_signature_prunes") or [])
+            history.append(note)
+            job.metadata["duplicate_signature_prunes"] = history
 
     def _is_approve_comment(self, body: str | None) -> bool:
         return bool(body and "/approve" in body.lower())

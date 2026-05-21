@@ -133,6 +133,48 @@ def test_issue_request_prompt_uses_gh_instructions() -> None:
     assert "PyGithub helper" not in prompt
 
 
+def test_issue_request_prompt_enforces_anti_duplicate_pre_check() -> None:
+    signature = "<!-- dani:stage=issue_request;job=abc;issue=7 -->"
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": signature,
+        },
+    )
+
+    assert "POST EXACTLY ONCE" in prompt
+    assert "gh issue view 7 --repo acme/demo --json comments" in prompt
+    assert f"grep -F '{signature}'" in prompt
+    assert "at most ONE time" in prompt
+
+
+def test_issue_followup_prompt_enforces_anti_duplicate_pre_check() -> None:
+    signature = "<!-- dani:stage=issue_followup;job=xyz;issue=7 -->"
+    prompt = render_prompt(
+        "issue_followup",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "comment_body": "any chance you can build it?",
+            "signature": signature,
+        },
+    )
+
+    assert "POST EXACTLY ONCE" in prompt
+    assert "gh issue view 7 --repo acme/demo --json comments" in prompt
+    assert f"grep -F '{signature}'" in prompt
+    assert "at most ONE time" in prompt
+
+
 def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None:
     prompt = render_prompt(
         "issue_request",

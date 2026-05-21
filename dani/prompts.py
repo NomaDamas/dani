@@ -68,6 +68,14 @@ For the "Evidence-based implementation plan" section, report:
 Use this exact signature somewhere in the comment:
 $signature
 
+POST EXACTLY ONCE. Strict anti-duplicate contract:
+- Before calling `gh issue comment`, run:
+  gh issue view $issue_number --repo $repo --json comments --jq '.comments[].body' | grep -F '$signature' || true
+  If that command prints anything non-empty, a comment with this exact signature already exists. DO NOT post again. Exit immediately.
+- Call `gh issue comment` at most ONE time in this session.
+- After `gh issue comment` returns successfully, do not run it again under any circumstance — not for retries, not for self-review, not for "double-checking". Exit.
+- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. If the signature is already present, the post succeeded; do not retry; exit.
+
 Post it with gh (write the comment to a file first, then send it):
 gh issue comment $issue_number --repo $repo --body-file <comment-file.md>
 
@@ -101,6 +109,14 @@ Write exactly one GitHub issue comment that addresses the new follow-up. The com
 - Remind the human that implementation starts only after a comment containing "/approve".
 - Include this exact signature on its own line:
 $signature
+
+POST EXACTLY ONCE. Strict anti-duplicate contract:
+- Before calling `gh issue comment`, run:
+  gh issue view $issue_number --repo $repo --json comments --jq '.comments[].body' | grep -F '$signature' || true
+  If that command prints anything non-empty, a comment with this exact signature already exists. DO NOT post again. Exit immediately.
+- Call `gh issue comment` at most ONE time in this session.
+- After `gh issue comment` returns successfully, do not run it again under any circumstance — not for retries, not for self-review, not for "double-checking". Exit.
+- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. If the signature is already present, the post succeeded; do not retry; exit.
 
 Post it with gh (write the comment to a file first, then send it):
 gh issue comment $issue_number --repo $repo --body-file <followup-comment.md>

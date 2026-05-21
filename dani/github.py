@@ -121,6 +121,32 @@ class GitHubCLI:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         return pull_request.create_issue_comment(body).raw_data
 
+    def delete_issue_comment(self, repo_full_name: str, comment_id: int) -> bool:
+        """Delete a single issue/PR comment by id.
+
+        Returns True on successful deletion, False if the comment no longer exists.
+        Other GithubException values propagate so callers can decide whether to
+        treat the failure as fatal.
+        """
+        repo = self._repo(repo_full_name)
+        try:
+            comment = repo.get_issue_comment(comment_id)
+        except UnknownObjectException:
+            return False
+        except GithubException as exc:
+            if exc.status == 404:
+                return False
+            raise
+        try:
+            comment.delete()
+        except UnknownObjectException:
+            return False
+        except GithubException as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
     def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         pull_request.edit(state="closed")
