@@ -31,7 +31,7 @@ Required environment variables:
 
 Optional environment variables:
 - `DANI_AGENT_RUNTIME` — selects the agent backend. Accepted values:
-  - `codex` / `oh-my-codex` (default)
+  - `codex` (default)
   - `omo` / `oh-my-openagents` / `oh-my-openagent` / `opencode`
 - `DANI_AGENT_TIMEOUT_SECONDS` — overrides the per-job agent wait timeout in seconds.
 

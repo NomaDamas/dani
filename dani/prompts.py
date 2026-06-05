@@ -256,10 +256,8 @@ After the push succeeds, exit.
 }
 
 
-_RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {}
-
-
 def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "codex") -> str:
+    del runtime
     template = TEMPLATES[template_name]
     context = dict(context)
     context.setdefault("review_cycle", "")
@@ -271,8 +269,4 @@ def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str =
             "signature": build_signature(stage=template_name, job_id=context.get("job_id", "unknown")),
         }
     rendered = template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
-    substitutions = _RUNTIME_SUBSTITUTIONS.get((runtime or "codex").strip().lower())
-    if substitutions:
-        for needle, replacement in substitutions:
-            rendered = rendered.replace(needle, replacement)
     return f"{NON_INTERACTIVE_GUARD}\n{rendered}"

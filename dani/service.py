@@ -19,8 +19,8 @@ from dani.errors import (
 from dani.git_sync import DevSyncConflictError, GitDevSyncer
 from dani.github import GitHubCLI, MergeConflictError
 from dani.models import (
+    RUNTIME_CODEX,
     RUNTIME_OMO,
-    RUNTIME_OMX,
     DaniConfig,
     JobRecord,
     NormalizedEvent,
@@ -67,7 +67,7 @@ class DaniService:
         config: DaniConfig,
         storage: JsonStorage | None = None,
         github: Any = None,
-        omx_runner: AgentRunner | None = None,
+        codex_runner: AgentRunner | None = None,
         dev_syncer: Any = None,
         runtime_runners: dict[str, AgentRunner] | None = None,
         session_bridge: OmoSessionBridge | None = None,
@@ -76,8 +76,8 @@ class DaniService:
         self.storage = storage or JsonStorage(config)
         self.github = github or GitHubCLI()
         preferred_runtime = normalize_runtime(config.agent_runtime)
-        self.omx_runner: AgentRunner = omx_runner or build_agent_runner(preferred_runtime, config.run_dir)
-        self._runtime_runners: dict[str, AgentRunner] = {preferred_runtime: self.omx_runner}
+        self.codex_runner: AgentRunner = codex_runner or build_agent_runner(preferred_runtime, config.run_dir)
+        self._runtime_runners: dict[str, AgentRunner] = {preferred_runtime: self.codex_runner}
         if runtime_runners:
             self._runtime_runners.update({normalize_runtime(name): runner for name, runner in runtime_runners.items()})
         self.dev_syncer = dev_syncer or GitDevSyncer(config.run_dir)
@@ -504,7 +504,7 @@ class DaniService:
             session = self._execute_job_session(
                 repo,
                 job,
-                runtime=RUNTIME_OMX,
+                runtime=RUNTIME_CODEX,
                 preferred_runtime=preferred_runtime,
                 bridge_context=bridge,
                 fallback_reason=f"claude_{exc.limit_type}_limit",
@@ -590,7 +590,7 @@ class DaniService:
         self._finalize_session(session, status="completed", termination_reason="completed")
 
     def _recovery_resume_session_id(self, job: JobRecord, *, runtime: str) -> str | None:
-        source_session_id = job.metadata.get("source_omx_session_id")
+        source_session_id = job.metadata.get("source_codex_session_id")
         if not isinstance(source_session_id, str) or not source_session_id:
             return None
         runner = self._runner_for_runtime(runtime)
@@ -602,7 +602,7 @@ class DaniService:
         source_runtime = job.metadata.get("source_effective_runtime") or job.metadata.get(
             "source_native_session_runtime"
         )
-        source_session_id = job.metadata.get("source_omx_session_id")
+        source_session_id = job.metadata.get("source_codex_session_id")
         if not isinstance(source_runtime, str) or not source_runtime:
             return preferred_runtime
         if not isinstance(source_session_id, str) or not source_session_id:
@@ -672,13 +672,13 @@ class DaniService:
         except Exception:
             self._finalize_session(session, status="failed", termination_reason="failed")
             raise
-        if session.omx_session_id is None:
+        if session.codex_session_id is None:
             post_wait_session_id = runner.get_session_id(session.runtime_handle)
             if post_wait_session_id:
-                session.omx_session_id = post_wait_session_id
+                session.codex_session_id = post_wait_session_id
                 self.storage.update_session(
                     session.id,
-                    omx_session_id=post_wait_session_id,
+                    codex_session_id=post_wait_session_id,
                     native_session_runtime=session.native_session_runtime or runtime,
                     effective_runtime=session.effective_runtime or runtime,
                 )
@@ -741,8 +741,8 @@ class DaniService:
                 job.metadata["usage_limit_reset_hint"] = usage_limit_error.reset_hint
             if usage_limit_error.suggested_retry_at:
                 job.metadata["usage_limit_until"] = usage_limit_error.suggested_retry_at
-        if session.omx_session_id:
-            job.metadata["omx_session_id"] = session.omx_session_id
+        if session.codex_session_id:
+            job.metadata["codex_session_id"] = session.codex_session_id
 
     def _runner_for_runtime(self, runtime: str) -> AgentRunner:
         normalized = normalize_runtime(runtime)
@@ -777,7 +777,7 @@ class DaniService:
             return preferred_runtime
         if self._has_active_omo_usage_limit(job.repo_full_name):
             job.metadata["fallback_reason"] = "cached_claude_usage_limit"
-            return RUNTIME_OMX
+            return RUNTIME_CODEX
         return preferred_runtime
 
     def _has_active_omo_usage_limit(self, repo_full_name: str) -> bool:
@@ -801,15 +801,15 @@ class DaniService:
         return False
 
     def _session_id_for_resume(self, job: JobRecord, session: SessionRecord) -> str:
-        if session.omx_session_id:
-            return session.omx_session_id
-        return self._omx_session_id_for(job)
+        if session.codex_session_id:
+            return session.codex_session_id
+        return self._codex_session_id_for(job)
 
     def _resume_runtime_for_session(self, session: SessionRecord) -> str:
         explicit_runtime = session.effective_runtime or session.native_session_runtime or session.preferred_runtime
         if explicit_runtime:
             return normalize_runtime(explicit_runtime)
-        if session.omx_session_id and self.omx_runner.can_resume(session.omx_session_id):
+        if session.codex_session_id and self.codex_runner.can_resume(session.codex_session_id):
             return normalize_runtime(self.config.agent_runtime)
         inferred_runtime = effective_session_runtime(session)
         if inferred_runtime:
@@ -821,7 +821,7 @@ class DaniService:
     ) -> BridgeContext | None:
         source_session_id = None
         if lineage_session is not None and effective_session_runtime(lineage_session) == RUNTIME_OMO:
-            source_session_id = lineage_session.omx_session_id
+            source_session_id = lineage_session.codex_session_id
         bridge = self.session_bridge.load(repo_path=Path(repo.local_path), session_id=source_session_id)
         if bridge is None:
             return None
@@ -979,10 +979,10 @@ class DaniService:
                 "preferred_runtime": job.metadata.get(
                     "preferred_runtime", normalize_runtime(self.config.agent_runtime)
                 ),
-                "source_omx_session_id": (
-                    source_session.omx_session_id
-                    if source_session is not None and source_session.omx_session_id
-                    else job.metadata.get("omx_session_id")
+                "source_codex_session_id": (
+                    source_session.codex_session_id
+                    if source_session is not None and source_session.codex_session_id
+                    else job.metadata.get("codex_session_id")
                 ),
                 "source_preferred_runtime": (source_session.preferred_runtime if source_session is not None else None),
                 "source_effective_runtime": (
@@ -1095,7 +1095,7 @@ class DaniService:
             runtime = preferred_runtime
             fallback_reason = None
             if preferred_runtime == RUNTIME_OMO and self._has_active_omo_usage_limit(job.repo_full_name):
-                runtime = RUNTIME_OMX
+                runtime = RUNTIME_CODEX
                 fallback_reason = "cached_claude_usage_limit"
             prompt = render_prompt(
                 "dev_sync_conflict",
@@ -1149,7 +1149,7 @@ class DaniService:
                     raise
                 if session is not None:
                     self._finalize_session(session, status="failed", termination_reason="failed")
-                runtime = RUNTIME_OMX
+                runtime = RUNTIME_CODEX
                 fallback_reason = f"claude_{limit_exc.limit_type}_limit"
                 prompt = render_prompt(
                     "dev_sync_conflict",
@@ -1772,11 +1772,11 @@ class DaniService:
 
     def _queue_issue_followup(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         session = self._latest_issue_lineage_session(event.repo_full_name, event.number)
-        if session is None or session.omx_session_id is None:
+        if session is None or session.codex_session_id is None:
             return {"status": "ignored", "reason": "missing_issue_session"}
         lineage_runtime = self._resume_runtime_for_session(session)
         lineage_runner = self._runner_for_runtime(lineage_runtime)
-        if not lineage_runner.can_resume(session.omx_session_id):
+        if not lineage_runner.can_resume(session.codex_session_id):
             rerouted_job = self._enqueue_job(
                 repo,
                 stage="issue_request",
@@ -1786,7 +1786,7 @@ class DaniService:
                     "body": event.payload.get("issue", {}).get("body", ""),
                     "comment_body": event.body or "",
                     "rerouted_from": "issue_followup",
-                    "prior_session_id": session.omx_session_id,
+                    "prior_session_id": session.codex_session_id,
                     "preferred_runtime": session.preferred_runtime or normalize_runtime(self.config.agent_runtime),
                     "effective_runtime": effective_session_runtime(session),
                     "native_session_runtime": session.native_session_runtime,
@@ -1804,7 +1804,7 @@ class DaniService:
                 "title": event.title or "",
                 "body": event.payload.get("issue", {}).get("body", ""),
                 "comment_body": event.body or "",
-                "omx_session_id": session.omx_session_id,
+                "codex_session_id": session.codex_session_id,
                 "preferred_runtime": session.preferred_runtime or normalize_runtime(self.config.agent_runtime),
                 "effective_runtime": effective_session_runtime(session),
                 "native_session_runtime": session.native_session_runtime,
@@ -1823,15 +1823,15 @@ class DaniService:
                 continue
             if session.stage not in {"issue_request", "issue_followup"}:
                 continue
-            if not session.omx_session_id:
+            if not session.codex_session_id:
                 continue
             return session
         return None
 
-    def _omx_session_id_for(self, job: JobRecord) -> str:
-        omx_session_id = job.metadata.get("omx_session_id")
-        if isinstance(omx_session_id, str) and omx_session_id:
-            return omx_session_id
+    def _codex_session_id_for(self, job: JobRecord) -> str:
+        codex_session_id = job.metadata.get("codex_session_id")
+        if isinstance(codex_session_id, str) and codex_session_id:
+            return codex_session_id
         msg = "missing-codex-session-id"
         raise RuntimeError(msg)
 

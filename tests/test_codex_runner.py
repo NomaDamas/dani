@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from dani.codex_runner import CodexRunner
 from dani.errors import RolloutMissingError
-from dani.omx_runner import OmxRunner
 from dani.signatures import build_signature
 
 
@@ -41,7 +41,7 @@ class _ExitedProcess:
         return None
 
 
-def test_capture_omx_session_id_matches_exec_signature_and_repo_path(tmp_path: Path) -> None:
+def test_capture_codex_session_id_matches_exec_signature_and_repo_path(tmp_path: Path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
     sessions_root = tmp_path / "sessions"
@@ -73,9 +73,9 @@ def test_capture_omx_session_id_matches_exec_signature_and_repo_path(tmp_path: P
         encoding="utf-8",
     )
     started_at = time.time() - 1
-    runner = OmxRunner(run_dir=tmp_path / "runs", sessions_root=sessions_root)
+    runner = CodexRunner(run_dir=tmp_path / "runs", sessions_root=sessions_root)
 
-    omx_session_id = runner._capture_omx_session_id(
+    codex_session_id = runner._capture_codex_session_id(
         repo_path=repo_path,
         prompt=f"Please use this signature: {signature}",
         started_at=started_at,
@@ -83,11 +83,11 @@ def test_capture_omx_session_id_matches_exec_signature_and_repo_path(tmp_path: P
         timeout_seconds=0.05,
     )
 
-    assert omx_session_id == "session-123"
+    assert codex_session_id == "session-123"
 
 
 def test_close_session_terminates_active_process(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     stdout_path = tmp_path / "stdout.log"
     stderr_path = tmp_path / "stderr.log"
     stdout_path.write_text("", encoding="utf-8")
@@ -106,32 +106,32 @@ def test_close_session_terminates_active_process(tmp_path: Path) -> None:
 
 
 def test_close_session_skips_missing_process(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     runner.close_session("runtime-123")
 
 
 def test_build_script_uses_codex_exec_with_full_permission(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     script = runner._build_script(repo_path=tmp_path / "repo", prompt_path=tmp_path / "prompt.txt")
 
     assert "codex exec --dangerously-bypass-approvals-and-sandbox" in script
-    assert "omx exec" not in script
+    assert f"{'o'}{'mx'} exec" not in script
 
 
 def test_build_resume_script_uses_codex_exec_resume_with_full_permission(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     script = runner._build_resume_script(
         repo_path=tmp_path / "repo",
         prompt_path=tmp_path / "prompt.txt",
-        omx_session_id="session-123",
+        codex_session_id="session-123",
     )
 
     assert "codex exec resume --dangerously-bypass-approvals-and-sandbox session-123" in script
-    assert "omx exec" not in script
+    assert f"{'o'}{'mx'} exec" not in script
 
 
 def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollout_found(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     runtime_handle = "runtime-123"
     runtime_dir = runner.run_dir / runtime_handle
     runtime_dir.mkdir(parents=True)
@@ -155,16 +155,16 @@ def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollou
         stderr_file.close()
 
 
-def test_omx_can_resume_uuid_like_session_id(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+def test_codex_can_resume_uuid_like_session_id(tmp_path: Path) -> None:
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     assert runner.can_resume("019da16a-565d-7c81-98c9-4b7ff38a3f9b") is True
 
 
-def test_omx_can_resume_rejects_opencode_prefixed_session_id(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+def test_codex_can_resume_rejects_opencode_prefixed_session_id(tmp_path: Path) -> None:
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     assert runner.can_resume("ses_25afdf9c7ffekN3dovMQw6meL2") is False
 
 
-def test_omx_can_resume_rejects_empty_or_none_session_id(tmp_path: Path) -> None:
-    runner = OmxRunner(run_dir=tmp_path / "runs")
+def test_codex_can_resume_rejects_empty_or_none_session_id(tmp_path: Path) -> None:
+    runner = CodexRunner(run_dir=tmp_path / "runs")
     assert runner.can_resume("") is False

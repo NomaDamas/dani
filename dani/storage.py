@@ -146,7 +146,7 @@ class JsonStorage:
         job_id: str | None = None,
         issue_number: int | None = None,
         pr_number: int | None = None,
-        require_omx_session_id: bool = False,
+        require_codex_session_id: bool = False,
         effective_runtime: str | None = None,
     ) -> SessionRecord | None:
         for session in reversed(self.list_sessions()):
@@ -160,7 +160,7 @@ class JsonStorage:
                 continue
             if pr_number is not None and session.pr_number != pr_number:
                 continue
-            if require_omx_session_id and not session.omx_session_id:
+            if require_codex_session_id and not session.codex_session_id:
                 continue
             if effective_runtime is not None and effective_session_runtime(session) != effective_runtime:
                 continue

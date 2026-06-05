@@ -13,7 +13,7 @@ from dani.models import DaniConfig
 from dani.server import create_app
 from dani.service import DaniService
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitHubCLI, FakeOmxRunner
+from tests.helpers import FakeCodexRunner, FakeGitHubCLI
 
 TEST_SECRET = "unit-test-secret"
 
@@ -26,9 +26,12 @@ def _signature(secret: str, body: bytes) -> str:
 def test_github_webhook_endpoint_accepts_valid_signature(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    codex_runner = FakeCodexRunner(github)
     service = DaniService(
-        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(AgentRunner, omx_runner)
+        config,
+        storage=JsonStorage(config),
+        github=cast(GitHubCLI, github),
+        codex_runner=cast(AgentRunner, codex_runner),
     )
     service.register_repo("acme/demo", str(tmp_path))
     client = TestClient(create_app(service))
@@ -60,12 +63,12 @@ def test_github_webhook_endpoint_queues_dev_sync_on_main_push(tmp_path: Path) ->
 
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    codex_runner = FakeCodexRunner(github)
     service = DaniService(
         config,
         storage=JsonStorage(config),
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -97,9 +100,12 @@ def test_github_webhook_endpoint_queues_dev_sync_on_main_push(tmp_path: Path) ->
 def test_github_webhook_endpoint_dedupes_duplicate_external_pr_delivery(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    codex_runner = FakeCodexRunner(github)
     service = DaniService(
-        config, storage=JsonStorage(config), github=cast(GitHubCLI, github), omx_runner=cast(AgentRunner, omx_runner)
+        config,
+        storage=JsonStorage(config),
+        github=cast(GitHubCLI, github),
+        codex_runner=cast(AgentRunner, codex_runner),
     )
     service.register_repo("acme/demo", str(tmp_path))
     client = TestClient(create_app(service))

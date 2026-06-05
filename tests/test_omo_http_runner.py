@@ -210,8 +210,8 @@ def test_launch_implementation_stage_prepends_ultrawork_prefix(runner_factory, t
     assert client.created_sessions and client.created_sessions[0]["directory"] == str(tmp_path)
     assert client.prompt_calls and client.prompt_calls[0]["session_id"] == client.created_sessions[0]["id"]
     assert client.prompt_calls[0]["prompt_text"] == "ultrawork\n\nImplement Issue #1."
-    assert session.omx_session_id == client.created_sessions[0]["id"]
-    assert consumer.registered == [session.omx_session_id]
+    assert session.codex_session_id == client.created_sessions[0]["id"]
+    assert consumer.registered == [session.codex_session_id]
     assert Path(session.prompt_path).read_text(encoding="utf-8") == "ultrawork\n\nImplement Issue #1."
 
 
@@ -262,7 +262,7 @@ def test_resume_validates_session_then_sends_prompt(runner_factory, tmp_path: Pa
 
     session = runner.resume(tmp_path, job, "Continue work", "ses_existingone1234")
 
-    assert session.omx_session_id == "ses_existingone1234"
+    assert session.codex_session_id == "ses_existingone1234"
     assert client.prompt_calls[0]["session_id"] == "ses_existingone1234"
     assert client.prompt_calls[0]["prompt_text"] == "ultrawork\n\nContinue work"
     assert consumer.registered == ["ses_existingone1234"]
@@ -307,7 +307,7 @@ def test_wait_returns_when_consumer_marks_idle(runner_factory, tmp_path: Path) -
 
     session = runner.launch(tmp_path, job, "hello")
 
-    consumer.complete_idle(session.omx_session_id)
+    consumer.complete_idle(session.codex_session_id)
     runner.wait(session.runtime_handle, timeout_seconds=2)
 
 
@@ -316,7 +316,7 @@ def test_wait_raises_transient_capacity_error_from_session_error(runner_factory,
     job = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=4)
 
     session = runner.launch(tmp_path, job, "hi")
-    consumer.complete_error(session.omx_session_id, "Selected model is at capacity, retry later.")
+    consumer.complete_error(session.codex_session_id, "Selected model is at capacity, retry later.")
 
     with pytest.raises(TransientCapacityError):
         runner.wait(session.runtime_handle, timeout_seconds=2)
@@ -329,7 +329,7 @@ def test_wait_raises_rollout_missing_error_from_session_error(runner_factory, tm
     job = JobRecord(repo_full_name="acme/demo", stage="issue_followup", issue_number=5)
 
     session = runner.resume(tmp_path, job, "go", "ses_doomedaa1234")
-    consumer.complete_error(session.omx_session_id, "Session not found: ses_doomedaa1234")
+    consumer.complete_error(session.codex_session_id, "Session not found: ses_doomedaa1234")
 
     with pytest.raises(RolloutMissingError):
         runner.wait(session.runtime_handle, timeout_seconds=2)
@@ -352,8 +352,8 @@ def test_close_session_aborts_and_unregisters(runner_factory, tmp_path: Path) ->
     session = runner.launch(tmp_path, job, "hi")
     runner.close_session(session.runtime_handle)
 
-    assert session.omx_session_id in client.aborted_sessions
-    assert session.omx_session_id in consumer.unregistered
+    assert session.codex_session_id in client.aborted_sessions
+    assert session.codex_session_id in consumer.unregistered
 
 
 def test_get_session_id_returns_id_after_launch(runner_factory, tmp_path: Path) -> None:
@@ -362,7 +362,7 @@ def test_get_session_id_returns_id_after_launch(runner_factory, tmp_path: Path) 
 
     session = runner.launch(tmp_path, job, "hi")
 
-    assert runner.get_session_id(session.runtime_handle) == session.omx_session_id
+    assert runner.get_session_id(session.runtime_handle) == session.codex_session_id
 
 
 def test_can_resume_accepts_ses_prefixed_ids(runner_factory, tmp_path: Path) -> None:
@@ -392,7 +392,7 @@ def test_runner_writes_request_log_for_inspection(runner_factory, tmp_path: Path
     session = runner.launch(tmp_path, job, "Implement Issue #10.")
 
     request_payload = json.loads(Path(session.script_path).read_text(encoding="utf-8"))
-    assert request_payload["session_id"] == session.omx_session_id
+    assert request_payload["session_id"] == session.codex_session_id
     assert request_payload["prompt_text"] == "ultrawork\n\nImplement Issue #10."
 
 
@@ -720,11 +720,11 @@ def test_dani_service_runs_issue_request_through_omo_http_runner_end_to_end(
         storage=storage,
         github=cast(GitHubCLI, github_stub),
         dev_syncer=FakeGitDevSyncer(),
-        omx_runner=runner,
+        codex_runner=runner,
     )
     service.register_repo("acme/demo", str(tmp_path))
 
-    assert isinstance(service.omx_runner, OmoHttpRunner)
+    assert isinstance(service.codex_runner, OmoHttpRunner)
 
     service.handle_event(
         NormalizedEvent(
@@ -745,7 +745,7 @@ def test_dani_service_runs_issue_request_through_omo_http_runner_end_to_end(
 
     sessions = storage.list_sessions()
     assert len(sessions) == 1
-    assert sessions[0].omx_session_id == fake_client.created_sessions[0]["id"]
+    assert sessions[0].codex_session_id == fake_client.created_sessions[0]["id"]
     assert not fake_client.prompt_calls[0]["prompt_text"].startswith("ultrawork"), (
         "issue_request is a planning stage; ultrawork prefix must not be auto-prepended"
     )

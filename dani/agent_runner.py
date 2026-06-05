@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, TextIO, cast, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
 
 RUNTIME_ALIASES: dict[str, str] = {
     "codex": "codex",
-    "oh-my-codex": "codex",
-    "omx": "codex",
     "omo": "omo",
     "oh-my-openagents": "omo",
     "oh-my-openagent": "omo",
@@ -21,9 +19,6 @@ class ManagedProcess(Protocol):
     def terminate(self) -> None: ...
     def wait(self, timeout: float | None = None) -> object: ...
     def kill(self) -> None: ...
-
-
-ProcessEntry = tuple[ManagedProcess, TextIO, TextIO]
 
 
 @runtime_checkable
@@ -45,7 +40,7 @@ class AgentRunner(Protocol):
         repo_path: Path,
         job: JobRecord,
         prompt: str,
-        omx_session_id: str,
+        codex_session_id: str,
     ) -> SessionRecord: ...
 
     def wait(
@@ -73,13 +68,13 @@ def normalize_runtime(runtime: str | None) -> str:
 
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
     """Factory returning the AgentRunner matching *runtime* (``codex`` or ``omo``)."""
+    from dani.codex_runner import CodexRunner
     from dani.omo_http_runner import OmoHttpRunner
-    from dani.omx_runner import OmxRunner
 
     normalized = normalize_runtime(runtime)
     if normalized == "codex":
-        return cast(AgentRunner, OmxRunner(run_dir))
+        return CodexRunner(run_dir)
     if normalized == "omo":
-        return cast(AgentRunner, OmoHttpRunner(run_dir))
+        return OmoHttpRunner(run_dir)
     msg = f"unknown agent runtime: {runtime!r} (expected 'codex' or 'omo')"
     raise ValueError(msg)

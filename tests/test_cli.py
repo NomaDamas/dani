@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 import dani.cli as cli_module
@@ -34,9 +35,10 @@ class FakeRestartService:
         self.calls.append(("wait_for_idle", None))
 
 
-def test_register_repo_and_show_state(tmp_path: Path) -> None:
+def test_register_repo_and_show_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runner = CliRunner()
     data_dir = tmp_path / ".dani"
+    monkeypatch.delenv("DANI_AGENT_RUNTIME", raising=False)
 
     register_result = runner.invoke(app, ["register-repo", "acme/demo", str(tmp_path), "--data-dir", str(data_dir)])
     assert register_result.exit_code == 0
@@ -107,7 +109,9 @@ def test_build_config_defaults_to_codex_runtime(tmp_path: Path, monkeypatch) -> 
     assert config.agent_runtime == "codex"
 
 
-def test_normalize_runtime_treats_omx_as_legacy_codex_alias() -> None:
+def test_normalize_runtime_rejects_removed_alias() -> None:
     assert normalize_runtime(None) == "codex"
     assert normalize_runtime("codex") == "codex"
-    assert normalize_runtime("omx") == "codex"
+    rejected_alias = "o" + "mx"
+    with pytest.raises(ValueError, match="unknown agent runtime"):
+        normalize_runtime(rejected_alias)

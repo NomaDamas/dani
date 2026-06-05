@@ -23,10 +23,6 @@ from dani.omo_http_runner import OmoHttpRunner  # noqa: E402
 from dani.opencode_http import OpencodeClient, OpencodeServerManager  # noqa: E402
 
 
-def _stamp(label: str, *, indent: int = 2) -> str:
-    return f"{' ' * indent}[{label}]"
-
-
 def _emit(test_id: str, message: str) -> None:
     ts = time.strftime("%H:%M:%S")
     print(f"{ts} {test_id} {message}", flush=True)
@@ -150,8 +146,8 @@ def test2_session_management() -> dict[str, Any]:
             )
             t0 = time.monotonic()
             session_a = runner.launch(repo_path, launch_job, prompt_a)
-            _emit(test_id, f"launch returned in {time.monotonic() - t0:.2f}s; session_id={session_a.omx_session_id}")
-            assert session_a.omx_session_id and session_a.omx_session_id.startswith("ses_")
+            _emit(test_id, f"launch returned in {time.monotonic() - t0:.2f}s; session_id={session_a.codex_session_id}")
+            assert session_a.codex_session_id and session_a.codex_session_id.startswith("ses_")
 
             _emit(test_id, "wait for session idle (timeout=180s)")
             t0 = time.monotonic()
@@ -161,7 +157,7 @@ def test2_session_management() -> dict[str, Any]:
             events_a = _read_events(session_a.stdout_path)
             summary_a = _summarize_events(events_a)
             _emit(test_id, f"events seen for session A: {summary_a}")
-            assert _parent_idle_seen(events_a, session_a.omx_session_id), (
+            assert _parent_idle_seen(events_a, session_a.codex_session_id), (
                 "parent session.idle event was never recorded in event log"
             )
             runner.close_session(session_a.runtime_handle)
@@ -177,11 +173,11 @@ def test2_session_management() -> dict[str, Any]:
                 "in your previous turn? Reply with ONLY that word, nothing else, then stop."
             )
             t0 = time.monotonic()
-            session_b = runner.resume(repo_path, resume_job, prompt_b, session_a.omx_session_id)
-            _emit(test_id, f"resume returned in {time.monotonic() - t0:.2f}s; session_id={session_b.omx_session_id}")
-            assert session_b.omx_session_id == session_a.omx_session_id, (
-                f"resume should target same session: got {session_b.omx_session_id}, "
-                f"expected {session_a.omx_session_id}"
+            session_b = runner.resume(repo_path, resume_job, prompt_b, session_a.codex_session_id)
+            _emit(test_id, f"resume returned in {time.monotonic() - t0:.2f}s; session_id={session_b.codex_session_id}")
+            assert session_b.codex_session_id == session_a.codex_session_id, (
+                f"resume should target same session: got {session_b.codex_session_id}, "
+                f"expected {session_a.codex_session_id}"
             )
 
             t0 = time.monotonic()
@@ -205,7 +201,7 @@ def test2_session_management() -> dict[str, Any]:
             runner.close_session(session_b.runtime_handle)
 
             return {
-                "session_id": session_a.omx_session_id,
+                "session_id": session_a.codex_session_id,
                 "events_seen_a": summary_a,
                 "resume_continuity_keyword_present": True,
             }
@@ -240,9 +236,10 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
             t0 = time.monotonic()
             session = runner.launch(repo_path, job, prompt)
             _emit(
-                test_id, f"launch returned in {time.monotonic() - t0:.2f}s; parent session_id={session.omx_session_id}"
+                test_id,
+                f"launch returned in {time.monotonic() - t0:.2f}s; parent session_id={session.codex_session_id}",
             )
-            assert session.omx_session_id and session.omx_session_id.startswith("ses_")
+            assert session.codex_session_id and session.codex_session_id.startswith("ses_")
 
             base_url_before = runner._server_manager.get_server_for_repo(repo_path)
             try:
@@ -272,13 +269,13 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
             summary = _summarize_events(events)
             _emit(test_id, f"events seen: {summary}")
 
-            child_session_ids = _child_session_created(events, session.omx_session_id)
-            _emit(test_id, f"child sessions spawned with parentID={session.omx_session_id}: {child_session_ids}")
+            child_session_ids = _child_session_created(events, session.codex_session_id)
+            _emit(test_id, f"child sessions spawned with parentID={session.codex_session_id}: {child_session_ids}")
             assert child_session_ids, (
                 "no child session.created events with parentID matching parent — subagent did not spawn"
             )
 
-            assert _parent_idle_seen(events, session.omx_session_id), (
+            assert _parent_idle_seen(events, session.codex_session_id), (
                 "parent session.idle was never recorded in event log"
             )
 
@@ -291,7 +288,7 @@ def test3_ultrawork_subagents() -> dict[str, Any]:
 
             runner.close_session(session.runtime_handle)
             return {
-                "parent_session_id": session.omx_session_id,
+                "parent_session_id": session.codex_session_id,
                 "child_session_ids": child_session_ids,
                 "events_summary": summary,
             }
@@ -310,8 +307,8 @@ def main() -> int:
         ("TEST3", test3_ultrawork_subagents),
     ]:
         print(f"\n{'=' * 72}\n{test_id}\n{'=' * 72}", flush=True)
+        t0 = time.monotonic()
         try:
-            t0 = time.monotonic()
             result = fn()
             duration = time.monotonic() - t0
             results[test_id] = {"status": "PASS", "duration_seconds": round(duration, 2), "data": result}

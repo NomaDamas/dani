@@ -17,7 +17,7 @@ from dani.github import GitHubCLI
 from dani.models import DaniConfig, NormalizedEvent
 from dani.service import RETRY_BACKOFF_SECONDS, DaniService
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner
+from tests.helpers import FakeCodexRunner, FakeGitDevSyncer, FakeGitHubCLI
 
 _CAPACITY_MSG = "capacity"
 
@@ -26,20 +26,20 @@ TEST_SECRET = "unit-test-secret"
 
 def make_service(
     tmp_path: Path, *, dev_syncer: FakeGitDevSyncer | None = None
-) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRunner]:
+) -> tuple[DaniService, FakeGitHubCLI, FakeCodexRunner]:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    codex_runner = FakeCodexRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, omx_runner
+    return service, github, codex_runner
 
 
 def _issue_event(number: int = 11) -> NormalizedEvent:
@@ -104,8 +104,8 @@ class TestCheckClaudeUsageLimitError:
 
 @patch("dani.service.time.sleep")
 def test_retry_succeeds_after_transient_failure(mock_sleep: object, tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
-    omx_runner.set_transient_failures(1)
+    service, _, codex_runner = make_service(tmp_path)
+    codex_runner.set_transient_failures(1)
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -115,14 +115,14 @@ def test_retry_succeeds_after_transient_failure(mock_sleep: object, tmp_path: Pa
     assert job.metadata["retry_attempts"] == 1
     assert len(job.metadata["retry_history"]) == 1
     assert job.metadata["retry_history"][0]["reason"] == "transient_capacity"
-    assert len(omx_runner.launches) == 2
+    assert len(codex_runner.launches) == 2
 
 
 @patch("dani.service.time.sleep")
 def test_retry_exhaustion_marks_job_failed(mock_sleep: object, tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     max_attempts = len(RETRY_BACKOFF_SECONDS) + 1
-    omx_runner.set_transient_failures(max_attempts)
+    codex_runner.set_transient_failures(max_attempts)
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -137,9 +137,9 @@ def test_retry_exhaustion_marks_job_failed(mock_sleep: object, tmp_path: Path) -
 
 @patch("dani.service.time.sleep")
 def test_non_transient_error_not_retried(mock_sleep: object, tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
-    original_launch = omx_runner.launch
+    original_launch = codex_runner.launch
 
     def failing_launch(*args, **kwargs):
         result = original_launch(*args, **kwargs)
@@ -147,7 +147,7 @@ def test_non_transient_error_not_retried(mock_sleep: object, tmp_path: Path) -> 
         github.issue_comment_map.clear()
         return result
 
-    omx_runner.launch = failing_launch  # type: ignore[assignment]
+    codex_runner.launch = failing_launch  # type: ignore[assignment]
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -160,8 +160,8 @@ def test_non_transient_error_not_retried(mock_sleep: object, tmp_path: Path) -> 
 
 @patch("dani.service.time.sleep")
 def test_retry_backoff_delays_are_correct(mock_sleep: object, tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
-    omx_runner.set_transient_failures(2)
+    service, _, codex_runner = make_service(tmp_path)
+    codex_runner.set_transient_failures(2)
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -175,7 +175,7 @@ def test_retry_backoff_delays_are_correct(mock_sleep: object, tmp_path: Path) ->
 
 @patch("dani.service.time.sleep")
 def test_retrying_status_visible_during_retry(mock_sleep: object, tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     observed_statuses: list[str] = []
     original_sleep = mock_sleep
 
@@ -185,7 +185,7 @@ def test_retrying_status_visible_during_retry(mock_sleep: object, tmp_path: Path
             observed_statuses.append(jobs[0].status)
 
     original_sleep.side_effect = capture_status  # type: ignore[union-attr]
-    omx_runner.set_transient_failures(1)
+    codex_runner.set_transient_failures(1)
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -195,15 +195,15 @@ def test_retrying_status_visible_during_retry(mock_sleep: object, tmp_path: Path
 
 @patch("dani.service.time.sleep")
 def test_transient_error_with_side_effect_already_posted_completes(mock_sleep: object, tmp_path: Path) -> None:
-    """If the OMX run posted the GitHub comment before the capacity error, don't retry — mark completed."""
-    service, _, omx_runner = make_service(tmp_path)
+    """If the Codex run posted the GitHub comment before the capacity error, don't retry — mark completed."""
+    service, _, codex_runner = make_service(tmp_path)
 
     # Don't use set_transient_failures — we want launch() to post the side effect
     # normally, then have wait() raise a transient error afterward.
     def wait_that_always_fails(runtime_handle: str, **kwargs: object) -> None:
         raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
 
-    omx_runner.wait = wait_that_always_fails  # type: ignore[assignment]
+    codex_runner.wait = wait_that_always_fails  # type: ignore[assignment]
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
@@ -212,7 +212,7 @@ def test_transient_error_with_side_effect_already_posted_completes(mock_sleep: o
     assert job.status == "completed"
     assert job.metadata.get("note") == "side_effect_already_posted"
     # Should NOT have retried — only 1 launch
-    assert len(omx_runner.launches) == 1
+    assert len(codex_runner.launches) == 1
 
 
 @patch("dani.service.time.sleep")
@@ -223,19 +223,19 @@ def test_restart_issue_request_with_stale_signed_comments_does_not_false_complet
     stale_signature = "<!-- dani:stage=issue_request;job=stale-job;issue=11 -->"
     github.add_issue_signature("acme/demo", 11, stale_signature)
 
-    original_launch = service.omx_runner.launch
+    original_launch = service.codex_runner.launch
 
     def launch_without_new_side_effect(repo_path: Path, job, prompt: str):
         session = original_launch(repo_path, job, prompt)
         github.issue_comment_map[("acme/demo", 11)] = [{"body": stale_signature}]
         return session
 
-    service.omx_runner.launch = launch_without_new_side_effect  # type: ignore[assignment]
+    service.codex_runner.launch = launch_without_new_side_effect  # type: ignore[assignment]
 
     def wait_that_always_fails(runtime_handle: str, **kwargs: object) -> None:
         raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
 
-    service.omx_runner.wait = wait_that_always_fails  # type: ignore[assignment]
+    service.codex_runner.wait = wait_that_always_fails  # type: ignore[assignment]
 
     service.handle_event(_issue_event())
     service.wait_for_idle()
