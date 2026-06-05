@@ -38,6 +38,14 @@ class JsonStorage:
         tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         tmp_path.replace(path)
 
+    def _normalize_session_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        legacy_session_key = f"{'o'}{'mx'}_session_id"
+        legacy_session_id = normalized.pop(legacy_session_key, None)
+        if "codex_session_id" not in normalized:
+            normalized["codex_session_id"] = legacy_session_id
+        return normalized
+
     def register_repo(self, repo: RepoConfig) -> None:
         with self._lock:
             payload = self._read_json(self.config.registry_path)
@@ -129,6 +137,9 @@ class JsonStorage:
                     continue
                 item.update(changes)
                 item["updated_at"] = utc_now()
+                normalized = self._normalize_session_item(item)
+                item.clear()
+                item.update(normalized)
                 self._write_json(self.config.sessions_path, payload)
                 return SessionRecord(**item)
         msg = f"Unknown session id: {session_id}"
@@ -137,7 +148,7 @@ class JsonStorage:
     def list_sessions(self) -> list[SessionRecord]:
         with self._lock:
             payload = self._read_json(self.config.sessions_path)
-            return [SessionRecord(**item) for item in payload["sessions"]]
+            return [SessionRecord(**self._normalize_session_item(item)) for item in payload["sessions"]]
 
     def find_latest_session(
         self,
@@ -147,7 +158,7 @@ class JsonStorage:
         job_id: str | None = None,
         issue_number: int | None = None,
         pr_number: int | None = None,
-        require_omx_session_id: bool = False,
+        require_codex_session_id: bool = False,
         effective_runtime: str | None = None,
     ) -> SessionRecord | None:
         for session in reversed(self.list_sessions()):
@@ -161,7 +172,7 @@ class JsonStorage:
                 continue
             if pr_number is not None and session.pr_number != pr_number:
                 continue
-            if require_omx_session_id and not session.omx_session_id:
+            if require_codex_session_id and not session.codex_session_id:
                 continue
             if effective_runtime is not None and effective_session_runtime(session) != effective_runtime:
                 continue

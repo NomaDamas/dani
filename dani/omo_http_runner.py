@@ -106,31 +106,31 @@ class OmoHttpRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=session.id,
+            codex_session_id=session.id,
             stdout_path=str(event_log_path),
             stderr_path=str(event_log_path),
         )
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
-        if not omx_session_id:
-            msg = "omx_session_id is required to resume an opencode session"
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str) -> SessionRecord:
+        if not codex_session_id:
+            msg = "codex_session_id is required to resume an opencode session"
             raise ValueError(msg)
         prompt_text = self._decorated_prompt(prompt, stage=job.stage)
         session_dir, prompt_path, request_log_path, event_log_path, handle = self._prepare_session_files(job)
         prompt_path.write_text(prompt_text, encoding="utf-8")
         client, consumer = self._get_client_and_consumer(repo_path, event_log_path)
         try:
-            client.get_session(omx_session_id, directory=str(repo_path))
+            client.get_session(codex_session_id, directory=str(repo_path))
         except OpencodeHttpError as exc:
             if self._is_session_missing_response(exc):
-                check_opencode_session_missing_error(f"Session not found: {omx_session_id}\n{exc.body}")
-                msg = f"opencode session {omx_session_id} not found (status {exc.status})"
+                check_opencode_session_missing_error(f"Session not found: {codex_session_id}\n{exc.body}")
+                msg = f"opencode session {codex_session_id} not found (status {exc.status})"
                 raise OpencodeHttpError(status=exc.status, body=msg, url=exc.url) from None
             raise
         self._submit_prompt_and_register(
             client=client,
             consumer=consumer,
-            session_id=omx_session_id,
+            session_id=codex_session_id,
             directory=str(repo_path),
             prompt_text=prompt_text,
             handle=handle,
@@ -149,7 +149,7 @@ class OmoHttpRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
             stdout_path=str(event_log_path),
             stderr_path=str(event_log_path),
         )

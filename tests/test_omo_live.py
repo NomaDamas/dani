@@ -55,8 +55,8 @@ def test_live_opencode_http_runner_launch_completes_through_server(tmp_path: Pat
         runner.close_session(session.runtime_handle)
         runner.shutdown()
 
-    assert session.omx_session_id is not None and session.omx_session_id.startswith("ses_"), (
-        f"expected captured opencode session id from HTTP runner, got {session.omx_session_id!r}"
+    assert session.codex_session_id is not None and session.codex_session_id.startswith("ses_"), (
+        f"expected captured opencode session id from HTTP runner, got {session.codex_session_id!r}"
     )
     prompt_text = Path(session.prompt_path).read_text(encoding="utf-8")
     assert prompt_text.startswith("ultrawork\n\n"), f"expected ultrawork-prefixed prompt, got {prompt_text[:60]!r}"
@@ -82,7 +82,7 @@ def test_live_opencode_http_runner_resume_continues_prior_session(tmp_path: Path
     finally:
         runner.close_session(launch_session.runtime_handle)
 
-    first_id = launch_session.omx_session_id
+    first_id = launch_session.codex_session_id
     assert first_id is not None and first_id.startswith("ses_")
 
     resume_job = JobRecord(repo_full_name="live/demo", stage="implementation", issue_number=11)
@@ -96,7 +96,7 @@ def test_live_opencode_http_runner_resume_continues_prior_session(tmp_path: Path
         runner.close_session(resume_session.runtime_handle)
         runner.shutdown()
 
-    assert resume_session.omx_session_id == first_id
+    assert resume_session.codex_session_id == first_id
 
     events_text = (
         Path(resume_session.stdout_path).read_text(encoding="utf-8", errors="replace")

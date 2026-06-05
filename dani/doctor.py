@@ -839,7 +839,7 @@ def _resolved_agent_runtime(ctx: CheckContext) -> str:
         return env_value
     if ctx.config_parsed and "agent_runtime" in ctx.config_parsed:
         return str(ctx.config_parsed["agent_runtime"])
-    return "omx"
+    return "codex"
 
 
 def _resolved_agent_timeout(ctx: CheckContext) -> float:
@@ -977,7 +977,7 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
     if runtime in OMX_FAMILY:
         records.append(
             _binary_record(
-                "omx",
+                "codex",
                 required=True,
                 timeout_seconds=ctx.timeout_seconds,
                 severity_when_missing=CheckStatus.FAIL,
@@ -985,7 +985,7 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
         )
         records.append(
             _binary_record(
-                "codex",
+                "omx",
                 required=False,
                 timeout_seconds=ctx.timeout_seconds,
                 severity_when_missing=CheckStatus.WARN,
@@ -993,7 +993,7 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
         )
     else:
         records.append({
-            "name": "omx",
+            "name": "codex",
             "found": None,
             "required": False,
             "severity": CheckStatus.SKIP.value,
@@ -1768,6 +1768,8 @@ def _ps_run(args: list[str], *, timeout_s: float) -> tuple[int, list[str]]:
 
 
 def _classify_ps_command(command: str) -> str | None:
+    if "codex exec" in command:
+        return "codex_exec"
     if "omx exec" in command:
         return "omx_exec"
     if "opencode serve" in command:

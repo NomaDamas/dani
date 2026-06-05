@@ -14,10 +14,10 @@ from dani.agent_runner import ManagedProcess
 from dani.errors import check_rollout_missing_error, check_transient_capacity_error
 from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
 
-__all__ = ["ManagedProcess", "OmxRunner"]
+__all__ = ["CodexRunner", "ManagedProcess"]
 
 
-class OmxRunner:
+class CodexRunner:
     def __init__(self, run_dir: Path, sessions_root: Path | None = None) -> None:
         self.run_dir = run_dir
         self.sessions_root = sessions_root or (Path.home() / ".codex" / "sessions")
@@ -49,9 +49,9 @@ class OmxRunner:
         )
         with self._lock:
             self._processes[process_handle] = (process, stdout_file, stderr_file)
-        omx_session_id = None
+        codex_session_id = None
         if job.stage in {"issue_request", "issue_followup"}:
-            omx_session_id = self._capture_omx_session_id(repo_path=repo_path, prompt=prompt, started_at=started_at)
+            codex_session_id = self._capture_codex_session_id(repo_path=repo_path, prompt=prompt, started_at=started_at)
         return SessionRecord(
             repo_full_name=job.repo_full_name,
             stage=job.stage,
@@ -63,12 +63,12 @@ class OmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
         )
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str) -> SessionRecord:
         session_token = uuid4().hex[:10]
         process_handle = f"dani-{job.stage}-{session_token}"
         session_dir = self.run_dir / process_handle
@@ -79,7 +79,7 @@ class OmxRunner:
         stderr_path = session_dir / "stderr.log"
         prompt_path.write_text(prompt, encoding="utf-8")
         script_path.write_text(
-            self._build_resume_script(repo_path=repo_path, prompt_path=prompt_path, omx_session_id=omx_session_id),
+            self._build_resume_script(repo_path=repo_path, prompt_path=prompt_path, codex_session_id=codex_session_id),
             encoding="utf-8",
         )
         script_path.chmod(0o755)
@@ -105,7 +105,7 @@ class OmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
             stdout_path=str(stdout_path),
             stderr_path=str(stderr_path),
         )
@@ -117,18 +117,18 @@ class OmxRunner:
             "#!/bin/sh\n"
             "set -eu\n"
             f"cd {quoted_repo}\n"
-            f'exec omx exec --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
+            f'exec codex exec --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
         )
 
-    def _build_resume_script(self, *, repo_path: Path, prompt_path: Path, omx_session_id: str) -> str:
+    def _build_resume_script(self, *, repo_path: Path, prompt_path: Path, codex_session_id: str) -> str:
         quoted_repo = shlex.quote(str(repo_path))
         quoted_prompt = shlex.quote(str(prompt_path))
-        quoted_session_id = shlex.quote(omx_session_id)
+        quoted_session_id = shlex.quote(codex_session_id)
         return (
             "#!/bin/sh\n"
             "set -eu\n"
             f"cd {quoted_repo}\n"
-            f'exec omx exec resume {quoted_session_id} --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
+            f'exec codex exec resume --dangerously-bypass-approvals-and-sandbox {quoted_session_id} "$(cat {quoted_prompt})"\n'
         )
 
     def wait(
@@ -143,7 +143,7 @@ class OmxRunner:
         try:
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            msg = f"omx exec process did not exit before timeout: {runtime_handle}"
+            msg = f"codex exec process did not exit before timeout: {runtime_handle}"
             raise TimeoutError(msg) from exc
 
         self._check_stderr_for_transient_error(runtime_handle)
@@ -181,7 +181,7 @@ class OmxRunner:
     def can_resume(self, session_id: str) -> bool:
         return bool(session_id) and not session_id.startswith("ses_")
 
-    def _capture_omx_session_id(
+    def _capture_codex_session_id(
         self,
         *,
         repo_path: Path,

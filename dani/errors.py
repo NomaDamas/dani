@@ -69,7 +69,7 @@ class ClaudeUsageLimitError(Exception):
 class RolloutMissingError(Exception):
     """Raised when a resume target rollout/session can no longer be found.
 
-    This error is runtime-agnostic: the OMX (codex) runner raises it when the
+    This error is runtime-agnostic: the Codex runner raises it when the
     codex rollout file is gone; the OMO (opencode) runner raises it when
     opencode reports the prior session no longer exists.
     """
@@ -116,7 +116,7 @@ def check_claude_usage_limit_error(stderr_text: str) -> None:
 
 
 def check_rollout_missing_error(stderr_text: str) -> None:
-    """Raise ``RolloutMissingError`` if *stderr_text* matches known OMX missing-rollout patterns."""
+    """Raise ``RolloutMissingError`` if *stderr_text* matches known Codex missing-rollout patterns."""
     for pattern in ROLLOUT_MISSING_PATTERNS:
         match = pattern.search(stderr_text)
         if match:

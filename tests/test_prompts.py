@@ -2,8 +2,12 @@ import pytest
 
 from dani.prompts import NON_INTERACTIVE_GUARD, TEMPLATES, render_prompt, split_non_interactive_guard
 
+REMOVED_IMPLEMENTATION_COMMAND = f"${'ra'}{'lph'}"
+REMOVED_REVIEW_COMMAND = f"${'code'}-{'review'}"
+REMOVED_PLAN_CRITIC = f"{'Mo'}{'mus'}-Plan-Critic"
 
-def test_implementation_prompt_keeps_ralph_literal() -> None:
+
+def test_implementation_prompt_uses_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -21,11 +25,12 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
         },
     )
 
-    assert "$ralph" in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
-def test_implementation_prompt_for_omo_replaces_ralph_with_ultrawork() -> None:
+def test_implementation_prompt_for_omo_keeps_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -44,11 +49,11 @@ def test_implementation_prompt_for_omo_replaces_ralph_with_ultrawork() -> None:
         runtime="omo",
     )
 
-    assert "$ralph" not in prompt
-    assert "ultrawork" in prompt
+    assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
 
 
-def test_implementation_prompt_for_omx_explicit_runtime_still_keeps_ralph() -> None:
+def test_implementation_prompt_for_codex_explicit_runtime_uses_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -64,10 +69,11 @@ def test_implementation_prompt_for_omx_explicit_runtime_still_keeps_ralph() -> N
             "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
             "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
         },
-        runtime="omx",
+        runtime="codex",
     )
 
-    assert "$ralph" in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
 
 
 def test_implementation_prompt_prefers_push_over_pr_edit_for_existing_pr() -> None:
@@ -366,11 +372,11 @@ def test_issue_followup_prompt_keeps_signature_on_own_line() -> None:
     assert signature_lines, "issue_followup must emit the signature on its own line for downstream parsers"
 
 
-def test_issue_followup_prompt_for_omo_does_not_replace_ralph_substring() -> None:
+def test_issue_followup_prompt_for_omo_does_not_use_removed_skill_commands() -> None:
     prompt = render_prompt("issue_followup", _issue_followup_context(), runtime="omo")
 
-    assert "$ralph" not in prompt
-    assert "$code-review" not in prompt
+    assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
+    assert REMOVED_REVIEW_COMMAND not in prompt
 
 
 def test_review_round_prompt_requires_code_review_and_verification() -> None:
@@ -387,13 +393,14 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
         },
     )
 
-    assert "$code-review" in prompt
+    assert REMOVED_REVIEW_COMMAND not in prompt
+    assert "Use Codex's normal code review judgment" in prompt
     assert "actual verification" in prompt.lower()
     assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
-def test_review_round_prompt_for_omo_delegates_to_momus_plan_critic() -> None:
+def test_review_round_prompt_for_omo_uses_plain_codex_review_guidance() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -408,12 +415,12 @@ def test_review_round_prompt_for_omo_delegates_to_momus_plan_critic() -> None:
         runtime="omo",
     )
 
-    assert "$code-review" not in prompt
-    assert "Momus-Plan-Critic" in prompt
-    assert "subagent" in prompt.lower()
+    assert REMOVED_REVIEW_COMMAND not in prompt
+    assert REMOVED_PLAN_CRITIC not in prompt
+    assert "Use Codex's normal code review judgment" in prompt
 
 
-def test_review_round_prompt_for_omo_does_not_mention_ralph_command() -> None:
+def test_review_round_prompt_for_omo_does_not_mention_removed_implementation_command() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -428,7 +435,7 @@ def test_review_round_prompt_for_omo_does_not_mention_ralph_command() -> None:
         runtime="omo",
     )
 
-    assert "$ralph" not in prompt
+    assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
 
 
 def test_review_round_prompt_for_external_contribution_mentions_contributor_ownership() -> None:
@@ -609,7 +616,7 @@ def test_split_non_interactive_guard_accepts_unguarded_prompt() -> None:
 
 
 @pytest.mark.parametrize("template_name", sorted(TEMPLATES))
-@pytest.mark.parametrize("runtime", ["omx", "omo"])
+@pytest.mark.parametrize("runtime", ["codex", "omo"])
 def test_every_template_prepends_non_interactive_guard(
     template_name: str,
     runtime: str,

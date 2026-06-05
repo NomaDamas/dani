@@ -5,18 +5,22 @@ from typing import cast
 import pytest
 
 from dani.agent_runner import AgentRunner
+from dani.codex_runner import CodexRunner
 from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
-from dani.models import RUNTIME_OMO, RUNTIME_OMX, DaniConfig, JobRecord, NormalizedEvent, SessionRecord
-from dani.omx_runner import OmxRunner
+from dani.models import RUNTIME_CODEX, RUNTIME_OMO, DaniConfig, JobRecord, NormalizedEvent, SessionRecord
 from dani.prompts import NON_INTERACTIVE_GUARD
 from dani.service import DaniService
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
-from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner, FakeRuntimeRunner
+from tests.helpers import FakeCodexRunner, FakeGitDevSyncer, FakeGitHubCLI, FakeRuntimeRunner
 
 TEST_SECRET = "unit-test-secret"
+
+
+class _GitHubOutageError(RuntimeError):
+    pass
 
 
 def add_exact_review_signature(github: FakeGitHubCLI, job: JobRecord) -> None:
@@ -37,8 +41,8 @@ def add_exact_review_signature(github: FakeGitHubCLI, job: JobRecord) -> None:
 
 def make_service(
     tmp_path: Path, *, dev_syncer: FakeGitDevSyncer | None = None
-) -> tuple[DaniService, FakeGitHubCLI, FakeOmxRunner]:
-    class ExactReviewSignatureOmxRunner(FakeOmxRunner):
+) -> tuple[DaniService, FakeGitHubCLI, FakeCodexRunner]:
+    class ExactReviewSignatureCodexRunner(FakeCodexRunner):
         def launch(self, repo_path: Path, job: JobRecord, prompt: str):
             session = super().launch(repo_path, job, prompt)
             if job.stage == "review_round" and job.issue_number is not None:
@@ -48,16 +52,16 @@ def make_service(
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = ExactReviewSignatureOmxRunner(github)
+    codex_runner = ExactReviewSignatureCodexRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, omx_runner
+    return service, github, codex_runner
 
 
 def make_omo_preferred_service(
@@ -79,19 +83,19 @@ def make_omo_preferred_service(
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     omo_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMO)
-    omx_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    codex_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
     bridge = StubBridge(bridge_context)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(OmxRunner, omo_runner),
+        codex_runner=cast(CodexRunner, omo_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
-        runtime_runners={RUNTIME_OMX: cast(OmxRunner, omx_runner)},
+        runtime_runners={RUNTIME_CODEX: cast(CodexRunner, codex_runner)},
         session_bridge=cast(OmoSessionBridge, bridge),
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, omo_runner, omx_runner
+    return service, github, omo_runner, codex_runner
 
 
 def make_pr_event(
@@ -135,7 +139,7 @@ def make_pr_comment_event(*, pr_number: int, body: str, actor_login: str = "agen
     )
 
 
-def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
+def test_issue_request_persists_codex_session_id(tmp_path: Path) -> None:
     service, _, _ = make_service(tmp_path)
 
     service.handle_event(
@@ -153,7 +157,7 @@ def test_issue_request_persists_omx_session_id(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     session = service.storage.list_sessions()[0]
-    assert session.omx_session_id == "omx-" + session.job_id
+    assert session.codex_session_id == "codex-" + session.job_id
 
 
 def test_issue_request_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -180,7 +184,7 @@ def test_issue_request_verification_rejects_stale_signature(tmp_path: Path) -> N
 
 
 def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     event = NormalizedEvent(
         kind="issue_opened",
         repo_full_name="acme/demo",
@@ -196,9 +200,9 @@ def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result["status"] == "queued"
-    assert omx_runner.launches[0]["job"].stage == "issue_request"
+    assert codex_runner.launches[0]["job"].stage == "issue_request"
     assert service.storage.list_jobs()[0].status == "completed"
-    assert omx_runner.closed_sessions == [f"runtime-{service.storage.list_jobs()[0].id}"]
+    assert codex_runner.closed_sessions == [f"runtime-{service.storage.list_jobs()[0].id}"]
     session = service.storage.list_sessions()[0]
     assert session.status == "completed"
     assert session.ended_at is not None
@@ -206,7 +210,7 @@ def test_issue_opened_queues_issue_request(tmp_path: Path) -> None:
 
 
 def test_general_issue_comment_resumes_existing_issue_session(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -236,14 +240,14 @@ def test_general_issue_comment_resumes_existing_issue_session(tmp_path: Path) ->
     service.wait_for_idle()
 
     assert result["stage"] == "issue_followup"
-    assert omx_runner.resumes[-1]["omx_session_id"].startswith("omx-")
-    assert omx_runner.resumes[-1]["job"].stage == "issue_followup"
+    assert codex_runner.resumes[-1]["codex_session_id"].startswith("codex-")
+    assert codex_runner.resumes[-1]["job"].stage == "issue_followup"
     followup_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=31)
     assert len(followup_jobs) == 1
 
 
 def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -259,16 +263,16 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
     )
 
     assert result == {"status": "ignored", "reason": "missing_issue_session"}
-    assert omx_runner.resumes == []
+    assert codex_runner.resumes == []
 
 
-def test_issue_request_falls_back_from_omo_to_omx_on_claude_session_limit(tmp_path: Path) -> None:
+def test_issue_request_falls_back_from_omo_to_codex_on_claude_session_limit(tmp_path: Path) -> None:
     bridge_context = BridgeContext(
         prompt_block="Prior OMO context (imported summary; not a native resume):\n- Open thread: finish edge cases",
         source_session_id="ses_prior_123",
         note="from_test",
     )
-    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, bridge_context=bridge_context)
+    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path, bridge_context=bridge_context)
     omo_runner.queue_wait_error(
         ClaudeUsageLimitError(
             "Claude usage limit reached",
@@ -297,21 +301,21 @@ def test_issue_request_falls_back_from_omo_to_omx_on_claude_session_limit(tmp_pa
     sessions = service.storage.list_sessions()
     assert job.status == "completed"
     assert job.metadata["preferred_runtime"] == RUNTIME_OMO
-    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
     assert job.metadata["fallback_reason"] == "claude_session_window_limit"
     assert job.metadata["usage_limit_kind"] == "session_window"
     assert job.metadata["bridge_source_session_id"] == "ses_prior_123"
     assert len(omo_runner.launches) == 1
-    assert len(omx_runner.launches) == 1
-    assert "Prior OMO context" in omx_runner.launches[0]["prompt"]
-    assert "not a native resume" in omx_runner.launches[0]["prompt"]
-    assert [session.effective_runtime for session in sessions] == [RUNTIME_OMO, RUNTIME_OMX]
+    assert len(codex_runner.launches) == 1
+    assert "Prior OMO context" in codex_runner.launches[0]["prompt"]
+    assert "not a native resume" in codex_runner.launches[0]["prompt"]
+    assert [session.effective_runtime for session in sessions] == [RUNTIME_OMO, RUNTIME_CODEX]
     assert sessions[0].status == "failed"
     assert sessions[1].status == "completed"
 
 
-def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_omx(tmp_path: Path) -> None:
-    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_codex(tmp_path: Path) -> None:
+    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path)
     service.storage.create_job(
         JobRecord(
             repo_full_name="acme/demo",
@@ -342,14 +346,14 @@ def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_omx(
 
     job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=52)[0]
     assert job.status == "completed"
-    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
     assert job.metadata["fallback_reason"] == "cached_claude_usage_limit"
     assert omo_runner.launches == []
-    assert len(omx_runner.launches) == 1
+    assert len(codex_runner.launches) == 1
 
 
-def test_issue_followup_after_omo_fallback_continues_on_omx_session(tmp_path: Path) -> None:
-    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path)
+def test_issue_followup_after_omo_fallback_continues_on_codex_session(tmp_path: Path) -> None:
+    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path)
     omo_runner.queue_wait_error(
         ClaudeUsageLimitError(
             "Opus weekly limit reached",
@@ -391,10 +395,10 @@ def test_issue_followup_after_omo_fallback_continues_on_omx_session(tmp_path: Pa
     followup_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=53)[0]
     assert result["stage"] == "issue_followup"
     assert followup_job.status == "completed"
-    assert followup_job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert followup_job.metadata["effective_runtime"] == RUNTIME_CODEX
     assert len(omo_runner.resumes) == 0
-    assert len(omx_runner.resumes) == 1
-    assert omx_runner.resumes[0]["job"].stage == "issue_followup"
+    assert len(codex_runner.resumes) == 1
+    assert codex_runner.resumes[0]["job"].stage == "issue_followup"
 
 
 def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_path: Path) -> None:
@@ -403,12 +407,14 @@ def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_
     assert repo is not None
     job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
 
-    omx_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMX)
+    codex_prompt = service._build_prompt(repo, job, runtime=RUNTIME_CODEX)
     omo_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+    removed_command = f"${'ra'}{'lph'}"
 
-    assert "$ralph" in omx_prompt
-    assert "$ralph" not in omo_prompt
-    assert "ultrawork" in omo_prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in codex_prompt
+    assert removed_command not in codex_prompt
+    assert removed_command not in omo_prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in omo_prompt
 
 
 def test_service_bridge_context_keeps_non_interactive_guard_first(tmp_path: Path) -> None:
@@ -465,7 +471,7 @@ def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_
 ) -> None:
     from dani.models import SessionRecord
 
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
     assert repo is not None
 
@@ -479,12 +485,12 @@ def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_
         worktree_path=str(tmp_path),
         job_id="legacy-job-id",
         issue_number=731,
-        omx_session_id=legacy_session_id,
+        codex_session_id=legacy_session_id,
     )
     service.storage.create_session(legacy_session)
 
     monkeypatch.setattr(
-        omx_runner,
+        codex_runner,
         "can_resume",
         lambda session_id: bool(session_id) and not session_id.startswith("019d"),
     )
@@ -511,12 +517,12 @@ def test_issue_comment_with_unresumable_prior_session_falls_back_to_fresh_issue_
     ]
     assert request_jobs, "expected a fresh issue_request to be enqueued when prior session id is non-resumable"
     assert not followup_jobs, "must NOT enqueue an issue_followup against an un-resumable session id"
-    assert not omx_runner.resumes, "runner.resume must not be invoked when can_resume returned False"
+    assert not codex_runner.resumes, "runner.resume must not be invoked when can_resume returned False"
     new_job = next(job for job in request_jobs if job.id != legacy_session.job_id)
     assert new_job.metadata["rerouted_from"] == "issue_followup"
     assert new_job.metadata["prior_session_id"] == legacy_session_id
     assert new_job.metadata["comment_body"] == "this is a fresh comment on a legacy issue"
-    assert any(launch["job"].issue_number == 731 for launch in omx_runner.launches), (
+    assert any(launch["job"].issue_number == 731 for launch in codex_runner.launches), (
         "runner.launch must run a fresh session for the legacy issue"
     )
 
@@ -526,7 +532,7 @@ def test_issue_comment_with_resumable_prior_session_still_resumes(
 ) -> None:
     from dani.models import SessionRecord
 
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
     assert repo is not None
 
@@ -540,12 +546,12 @@ def test_issue_comment_with_resumable_prior_session_still_resumes(
         worktree_path=str(tmp_path),
         job_id="resumable-job-id",
         issue_number=732,
-        omx_session_id=resumable_session_id,
+        codex_session_id=resumable_session_id,
     )
     service.storage.create_session(resumable_session)
 
     monkeypatch.setattr(
-        omx_runner,
+        codex_runner,
         "can_resume",
         lambda session_id: bool(session_id) and session_id.startswith("ses_"),
     )
@@ -568,7 +574,7 @@ def test_issue_comment_with_resumable_prior_session_still_resumes(
         job for job in service.storage.list_jobs() if job.stage == "issue_followup" and job.issue_number == 732
     ]
     assert followup_jobs, "expected an issue_followup job when prior session id is resumable"
-    assert any(resume["omx_session_id"] == resumable_session_id for resume in omx_runner.resumes), (
+    assert any(resume["codex_session_id"] == resumable_session_id for resume in codex_runner.resumes), (
         "runner.resume must be invoked with the resumable session id"
     )
 
@@ -666,7 +672,7 @@ def test_issue_comment_recovery_verification_prunes_duplicate_recovery_comments(
 
 
 def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warning(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -681,7 +687,7 @@ def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warni
     )
     service.wait_for_idle()
 
-    omx_runner.set_resume_failure(
+    codex_runner.set_resume_failure(
         RolloutMissingError(
             "thread/resume failed: no rollout found for thread id 019d6829",
             "no rollout found",
@@ -720,7 +726,7 @@ def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warni
 
 
 def test_issue_followup_rollout_missing_warning_comment_is_posted_only_once(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -734,7 +740,7 @@ def test_issue_followup_rollout_missing_warning_comment_is_posted_only_once(tmp_
         )
     )
     service.wait_for_idle()
-    omx_runner.set_resume_failure(
+    codex_runner.set_resume_failure(
         RolloutMissingError(
             "thread/resume failed: no rollout found for thread id 019d6829",
             "no rollout found",
@@ -776,7 +782,7 @@ def test_issue_followup_rollout_missing_warning_comment_is_posted_only_once(tmp_
 
 
 def test_issue_followup_rollout_missing_retries_warning_after_comment_post_failure(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -790,7 +796,7 @@ def test_issue_followup_rollout_missing_retries_warning_after_comment_post_failu
         )
     )
     service.wait_for_idle()
-    omx_runner.set_resume_failure(
+    codex_runner.set_resume_failure(
         RolloutMissingError(
             "thread/resume failed: no rollout found for thread id 019d6829",
             "no rollout found",
@@ -857,7 +863,7 @@ def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(t
         stage="issue_followup",
         issue_number=41,
         status="failed",
-        metadata={"omx_session_id": "omx-stale", "title": "Restart me", "body": "Original body"},
+        metadata={"codex_session_id": "codex-stale", "title": "Restart me", "body": "Original body"},
     )
     untouched = JobRecord(repo_full_name="acme/demo", stage="issue_request", issue_number=99, status="completed")
     service.storage.create_job(stale_request)
@@ -947,7 +953,7 @@ def test_rehydrate_requeues_launched_job_and_transitions_orphan_session(tmp_path
         service.config,
         storage=service.storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     rebuilt.queue_manager.join_all()
@@ -984,7 +990,7 @@ def test_rehydrate_reconciles_drift_at_startup(tmp_path: Path) -> None:
         service.config,
         storage=service.storage,
         github=cast(GitHubCLI, FakeGitHubCLI()),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(FakeGitHubCLI())),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(FakeGitHubCLI())),
         dev_syncer=FakeGitDevSyncer(),
     )
 
@@ -1001,7 +1007,7 @@ def test_reconcile_orphan_session_handles_missing_session_id(tmp_path: Path) -> 
 
 
 def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -1032,11 +1038,11 @@ def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path
 
     assert result == {"status": "ignored", "reason": "comment_opt_out"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=36) == []
-    assert omx_runner.resumes == []
+    assert codex_runner.resumes == []
 
 
 def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1054,11 +1060,11 @@ def test_issue_comment_with_ignore_command_overrides_approve(tmp_path: Path) -> 
 
     assert result == {"status": "ignored", "reason": "comment_opt_out"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=37) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     event = NormalizedEvent(
         kind="issue_comment",
         repo_full_name="acme/demo",
@@ -1074,12 +1080,12 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
-    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
     assert service.storage.list_jobs()[0].status == "completed"
 
 
 def test_approve_from_repo_owner_login_queues_implementation(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1096,12 +1102,12 @@ def test_approve_from_repo_owner_login_queues_implementation(tmp_path: Path) -> 
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
-    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
     assert github.recorded_issue_comment_reactions == []
 
 
 def test_approve_with_owner_author_association_queues_implementation(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1121,12 +1127,12 @@ def test_approve_with_owner_author_association_queues_implementation(tmp_path: P
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
-    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
     assert github.recorded_issue_comment_reactions == []
 
 
 def test_approve_with_member_author_association_queues_without_membership_api_call(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1146,13 +1152,13 @@ def test_approve_with_member_author_association_queues_without_membership_api_ca
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
-    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
     assert github.org_members_by_casefolded_org == {}
     assert github.recorded_issue_comment_reactions == []
 
 
 def test_approve_from_org_member_queues_implementation(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.register_org_member("acme", "alice")
 
     result = service.handle_event(
@@ -1173,12 +1179,12 @@ def test_approve_from_org_member_queues_implementation(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result["stage"] == "implementation"
-    assert omx_runner.launches[0]["job"].stage == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
     assert github.recorded_issue_comment_reactions == []
 
 
 def test_approve_from_unauthorized_actor_is_ignored_with_thumbs_down_reaction(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.register_org_member("acme", "alice")
 
     result = service.handle_event(
@@ -1200,12 +1206,12 @@ def test_approve_from_unauthorized_actor_is_ignored_with_thumbs_down_reaction(tm
 
     assert result == {"status": "ignored", "reason": "approver_not_authorized"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=25) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert github.recorded_issue_comment_reactions == [("acme/demo", 25, 12345, "-1")]
 
 
 def test_approve_from_collaborator_is_ignored(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1225,12 +1231,12 @@ def test_approve_from_collaborator_is_ignored(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "approver_not_authorized"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert github.recorded_issue_comment_reactions == [("acme/demo", 26, 200, "-1")]
 
 
 def test_approve_unauthorized_skips_reaction_when_comment_id_missing(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -1247,12 +1253,12 @@ def test_approve_unauthorized_skips_reaction_when_comment_id_missing(tmp_path: P
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "approver_not_authorized"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert github.recorded_issue_comment_reactions == []
 
 
 def test_approve_unauthorized_swallows_reaction_failure(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.simulated_reaction_failure = RuntimeError("github outage")
 
     result = service.handle_event(
@@ -1273,12 +1279,12 @@ def test_approve_unauthorized_swallows_reaction_failure(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "approver_not_authorized"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_failed_job_still_closes_runtime_handle_and_marks_failure(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
-    session = omx_runner.launch(Path(tmp_path), JobRecord(repo_full_name="acme/demo", stage="implementation"), "")
+    service, _, codex_runner = make_service(tmp_path)
+    session = codex_runner.launch(Path(tmp_path), JobRecord(repo_full_name="acme/demo", stage="implementation"), "")
     service.storage.create_session(session)
 
     service._finalize_session(session, status="failed", termination_reason="RuntimeError")
@@ -1287,11 +1293,11 @@ def test_failed_job_still_closes_runtime_handle_and_marks_failure(tmp_path: Path
     assert stored.status == "failed"
     assert stored.ended_at is not None
     assert stored.termination_reason == "RuntimeError"
-    assert omx_runner.closed_sessions == [session.runtime_handle]
+    assert codex_runner.closed_sessions == [session.runtime_handle]
 
 
 def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     implementation_event = NormalizedEvent(
         kind="issue_comment",
         repo_full_name="acme/demo",
@@ -1328,11 +1334,11 @@ def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: P
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=99)
     assert result["stage"] == "review_round"
     assert review_jobs[0].review_round == 1
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_external_pr_opened_queues_review_round(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
     service.wait_for_idle()
@@ -1341,11 +1347,11 @@ def test_external_pr_opened_queues_review_round(tmp_path: Path) -> None:
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
     assert [job.review_round for job in review_jobs] == [1]
     assert review_jobs[0].metadata["external_contribution"] is True
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_external_pr_new_commit_queues_another_review_round(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
     service.wait_for_idle()
@@ -1356,11 +1362,11 @@ def test_external_pr_new_commit_queues_another_review_round(tmp_path: Path) -> N
     assert result["stage"] == "review_round"
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
     assert [job.review_round for job in review_jobs] == [1, 2]
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_duplicate_external_pr_activity_event_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21", commit_sha="sha-1"))
     service.wait_for_idle()
@@ -1378,7 +1384,7 @@ def test_duplicate_external_pr_activity_event_is_ignored(tmp_path: Path) -> None
     assert duplicate == {"status": "ignored", "reason": "duplicate_external_pr_event"}
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
     assert [job.review_round for job in review_jobs] == [1, 2]
-    assert len(omx_runner.launches) == 2
+    assert len(codex_runner.launches) == 2
 
 
 def test_duplicate_external_pr_activity_does_not_consume_review_limit(tmp_path: Path) -> None:
@@ -1462,17 +1468,17 @@ def test_external_pr_fallback_dedupe_key_is_repo_scoped(tmp_path: Path) -> None:
 
 
 def test_external_pr_review_requested_queues_review_round(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(make_pr_event(pr_number=91, action="review_requested", body="Implements #21"))
     service.wait_for_idle()
 
     assert result["stage"] == "review_round"
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_external_pr_from_account_younger_than_one_year_is_closed(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.users["newcomer"] = {"login": "newcomer", "created_at": "3000-01-01T00:00:00Z"}
 
     result = service.handle_event(
@@ -1483,7 +1489,7 @@ def test_external_pr_from_account_younger_than_one_year_is_closed(tmp_path: Path
     assert result == {"status": "closed", "reason": "contributor_account_too_new", "pr_number": 92}
     assert github.closed_pull_requests == [("acme/demo", 92)]
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=92) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     comments = github.pr_comments("acme/demo", 92)
     assert len(comments) == 1
     assert "at least one year old" in comments[0]["body"]
@@ -1507,7 +1513,7 @@ def test_external_pr_uses_pull_request_author_created_at_instead_of_sender(tmp_p
 
 
 def test_external_pr_from_account_at_least_one_year_old_queues_review_round(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.users["veteran"] = {"login": "veteran", "created_at": "2000-01-01T00:00:00Z"}
 
     result = service.handle_event(
@@ -1518,11 +1524,11 @@ def test_external_pr_from_account_at_least_one_year_old_queues_review_round(tmp_
     assert result["stage"] == "review_round"
     assert github.closed_pull_requests == []
     assert all("at least one year old" not in comment["body"] for comment in github.pr_comments("acme/demo", 94))
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_external_review_comment_queues_implementation_like_internal_pr(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
     service.wait_for_idle()
     review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)[-1]
@@ -1539,12 +1545,12 @@ def test_external_review_comment_queues_implementation_like_internal_pr(tmp_path
     implementation_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88)
     assert len(implementation_jobs) == 1
     assert implementation_jobs[0].metadata["external_contribution"] is True
-    assert omx_runner.launches[-1]["job"].stage == "implementation"
+    assert codex_runner.launches[-1]["job"].stage == "implementation"
     assert github.merged == []
 
 
 def test_external_review_approve_comment_still_follows_internal_implementation_path(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21"))
     service.wait_for_idle()
     review_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)[-1]
@@ -1560,12 +1566,12 @@ def test_external_review_approve_comment_still_follows_internal_implementation_p
     assert result["stage"] == "implementation"
     assert len(service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88)) == 1
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=88) == []
-    assert omx_runner.launches[-1]["job"].stage == "implementation"
+    assert codex_runner.launches[-1]["job"].stage == "implementation"
     assert github.merged == []
 
 
 def test_external_final_verdict_approve_requires_human_merge_for_non_owner_pr(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.add_pull_request(
         "acme/demo",
         88,
@@ -1584,12 +1590,12 @@ def test_external_final_verdict_approve_requires_human_merge_for_non_owner_pr(tm
 
     assert result == {"status": "approved", "reason": "human_merge_required", "pr_number": 88}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=88) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert github.merged == []
 
 
 def test_external_pr_activity_stops_at_standard_review_round_limit(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     for round_number in range(1, 4):
         service.storage.create_job(
             JobRecord(
@@ -1607,11 +1613,11 @@ def test_external_pr_activity_stops_at_standard_review_round_limit(tmp_path: Pat
 
     assert result == {"status": "ignored", "reason": "external_review_rounds_exhausted"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_external_review_chain_reaches_final_verdict_like_internal_pr(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     service.handle_event(make_pr_event(pr_number=88, action="opened", body="Implements #21", commit_sha="sha-1"))
     service.wait_for_idle()
@@ -1646,11 +1652,11 @@ def test_external_review_chain_reaches_final_verdict_like_internal_pr(tmp_path: 
     assert len(implementation_jobs) == 3
     assert len(verdict_jobs) == 1
     assert verdict_jobs[0].metadata["external_contribution"] is True
-    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert codex_runner.launches[-1]["job"].stage == "final_verdict"
 
 
 def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(tmp_path: Path) -> None:
-    class BlockingOmxRunner(FakeOmxRunner):
+    class BlockingCodexRunner(FakeCodexRunner):
         def __init__(self, github: FakeGitHubCLI) -> None:
             super().__init__(github)
             self.review_started = threading.Event()
@@ -1674,12 +1680,12 @@ def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(t
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = BlockingOmxRunner(github)
+    codex_runner = BlockingCodexRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -1688,7 +1694,7 @@ def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(t
         make_pr_event(pr_number=88, action="opened", body="Implements #21", commit_sha="sha-1")
     )
     assert opened["stage"] == "review_round"
-    assert omx_runner.review_started.wait(timeout=1)
+    assert codex_runner.review_started.wait(timeout=1)
 
     results = []
     for round_number in range(2, 6):
@@ -1710,7 +1716,7 @@ def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(t
     ]
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="human_escalation", pr_number=88) == []
 
-    omx_runner.release_review.set()
+    codex_runner.release_review.set()
     service.wait_for_idle()
 
     review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=88)
@@ -1721,7 +1727,7 @@ def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(t
 
 
 def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     pr_event = NormalizedEvent(
         kind="pull_request_opened",
         repo_full_name="acme/demo",
@@ -1790,7 +1796,7 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
 
     verdict_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=77)
     assert verdict_jobs
-    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert codex_runner.launches[-1]["job"].stage == "final_verdict"
     assert [
         job.review_round
         for job in service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=77)
@@ -1814,7 +1820,7 @@ def test_review_chain_reaches_verdict_and_merges_on_approve(tmp_path: Path) -> N
 
 
 def test_approve_verdict_with_merge_conflict_queues_resolution_job(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.merge_conflicts.add(("acme/demo", 77))
     github.add_pull_request(
         "acme/demo",
@@ -1847,7 +1853,7 @@ def test_approve_verdict_with_merge_conflict_queues_resolution_job(tmp_path: Pat
     assert resolution_jobs
     assert resolution_jobs[0].issue_number == 5
     assert resolution_jobs[0].metadata["head_branch"] == "Feature/#5"
-    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert codex_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
     assert github.merged == []
 
 
@@ -1899,7 +1905,7 @@ def test_approve_verdict_with_merge_conflict_reuses_tracked_issue_number_without
 
 
 def test_merge_conflict_resolution_comment_queues_final_verdict_retry(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     pr_body = "Implements #5\n<!-- dani:stage=implementation;job=impl-1;issue=5 -->"
     github.add_pull_request(
         "acme/demo",
@@ -1931,11 +1937,11 @@ def test_merge_conflict_resolution_comment_queues_final_verdict_retry(tmp_path: 
     assert verdict_jobs[0].issue_number == 5
     assert verdict_jobs[0].metadata["title"] == "Feature/#5"
     assert verdict_jobs[0].metadata["body"] == pr_body
-    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
+    assert codex_runner.launches[-1]["job"].stage == "final_verdict"
 
 
 def test_duplicate_merge_conflict_resolution_event_is_ignored(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.add_pull_request(
         "acme/demo",
         77,
@@ -1965,8 +1971,8 @@ def test_duplicate_merge_conflict_resolution_event_is_ignored(tmp_path: Path) ->
     assert first["status"] == "queued"
     assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
     assert len(verdict_jobs) == 1
-    assert omx_runner.launches[-1]["job"].stage == "final_verdict"
-    assert omx_runner.launches[-1]["job"].pr_number == 77
+    assert codex_runner.launches[-1]["job"].stage == "final_verdict"
+    assert codex_runner.launches[-1]["job"].pr_number == 77
 
 
 def test_merge_conflict_resolution_requires_its_own_signed_comment(tmp_path: Path) -> None:
@@ -2008,7 +2014,7 @@ def test_review_round_verification_rejects_stale_signed_comment(tmp_path: Path) 
 
 
 def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     event = NormalizedEvent(
         kind="pull_request_comment",
         repo_full_name="acme/demo",
@@ -2030,8 +2036,8 @@ def test_duplicate_review_round_event_is_ignored(tmp_path: Path) -> None:
     assert first["status"] == "queued"
     assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
     assert len(implementation_jobs) == 1
-    assert omx_runner.launches[-1]["job"].stage == "implementation"
-    assert omx_runner.launches[-1]["job"].pr_number == 77
+    assert codex_runner.launches[-1]["job"].stage == "implementation"
+    assert codex_runner.launches[-1]["job"].pr_number == 77
 
 
 def test_implementation_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -2081,7 +2087,7 @@ def test_final_verdict_verification_rejects_unrelated_signed_comment(tmp_path: P
 
 
 def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.merge_conflicts.add(("acme/demo", 77))
     github.add_pull_request(
         "acme/demo",
@@ -2114,15 +2120,13 @@ def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
     assert first["status"] == "queued"
     assert second == {"status": "ignored", "reason": "duplicate_agent_event"}
     assert len(resolution_jobs) == 1
-    assert omx_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
-    assert omx_runner.launches[-1]["job"].pr_number == 77
+    assert codex_runner.launches[-1]["job"].stage == "merge_conflict_resolution"
+    assert codex_runner.launches[-1]["job"].pr_number == 77
 
 
 def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> None:
     """A transient merge failure must not poison redelivery — the retry must succeed."""
-    from github.GithubException import GithubException
-
-    service, github, _omx_runner = make_service(tmp_path)
+    service, github, _codex_runner = make_service(tmp_path)
     service.storage.create_job(
         JobRecord(
             repo_full_name="acme/demo",
@@ -2144,7 +2148,7 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
     original_merge = github.merge_pull_request
 
     def boom(repo_full_name: str, pr_number: int) -> None:
-        raise GithubException(500, {"message": "GitHub outage"}, {})
+        raise _GitHubOutageError
 
     github.merge_pull_request = boom  # type: ignore[assignment]
     event = NormalizedEvent(
@@ -2159,7 +2163,7 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
         is_pull_request=True,
     )
 
-    with pytest.raises(GithubException):
+    with pytest.raises(_GitHubOutageError):
         service.handle_event(event)
 
     # Restore normal merge and redeliver the same event
@@ -2170,7 +2174,7 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
 
 
 def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.open_issues["acme/demo"] = [
         {"number": 5, "title": "Bootstrap me", "body": "Need sync"},
         {"number": 6, "title": "Skip PR", "body": "PR body", "pull_request": {"url": "x"}},
@@ -2180,15 +2184,15 @@ def test_bootstrap_repo_queues_existing_open_issues(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert count == 1
-    assert len(omx_runner.launches) == 1
-    first_job = omx_runner.launches[0]["job"]
+    assert len(codex_runner.launches) == 1
+    first_job = codex_runner.launches[0]["job"]
     assert isinstance(first_job, JobRecord)
     assert first_job.issue_number == 5
     assert first_job.stage == "issue_request"
 
 
 def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     github.open_issues["acme/demo"] = [
         {"number": 5, "title": "Already handled", "body": "Need sync"},
         {"number": 6, "title": "Needs bootstrap", "body": "Need report"},
@@ -2203,8 +2207,8 @@ def test_bootstrap_repo_skips_issues_with_existing_issue_request_signature(tmp_p
     service.wait_for_idle()
 
     assert count == 1
-    assert len(omx_runner.launches) == 1
-    only_job = omx_runner.launches[0]["job"]
+    assert len(codex_runner.launches) == 1
+    only_job = codex_runner.launches[0]["job"]
     assert isinstance(only_job, JobRecord)
     assert only_job.issue_number == 6
     assert only_job.stage == "issue_request"
@@ -2472,9 +2476,9 @@ def test_duplicate_main_push_is_ignored(tmp_path: Path) -> None:
     assert dev_syncer.sync_calls == [("acme/demo", "abc123")]
 
 
-def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
+def test_dev_sync_conflict_launches_codex_and_cleans_up(tmp_path: Path) -> None:
     dev_syncer = FakeGitDevSyncer(conflict=True)
-    service, _, omx_runner = make_service(tmp_path, dev_syncer=dev_syncer)
+    service, _, codex_runner = make_service(tmp_path, dev_syncer=dev_syncer)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -2492,15 +2496,15 @@ def test_dev_sync_conflict_launches_omx_and_cleans_up(tmp_path: Path) -> None:
 
     jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")
     assert result["stage"] == "dev_sync"
-    assert omx_runner.launches[-1]["job"].stage == "dev_sync"
+    assert codex_runner.launches[-1]["job"].stage == "dev_sync"
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
     assert jobs[0].status == "completed"
 
 
-def test_dev_sync_conflict_falls_back_from_omo_to_omx_on_weekly_limit(tmp_path: Path) -> None:
+def test_dev_sync_conflict_falls_back_from_omo_to_codex_on_weekly_limit(tmp_path: Path) -> None:
     dev_syncer = FakeGitDevSyncer(conflict=True)
-    service, _, omo_runner, omx_runner = make_omo_preferred_service(tmp_path, dev_syncer=dev_syncer)
+    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path, dev_syncer=dev_syncer)
     omo_runner.queue_wait_error(
         ClaudeUsageLimitError(
             "Opus weekly limit reached",
@@ -2528,10 +2532,10 @@ def test_dev_sync_conflict_falls_back_from_omo_to_omx_on_weekly_limit(tmp_path: 
     job = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")[0]
     assert result["stage"] == "dev_sync"
     assert job.status == "completed"
-    assert job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
     assert job.metadata["usage_limit_kind"] == "weekly"
     assert len(omo_runner.launches) == 1
-    assert len(omx_runner.launches) == 1
+    assert len(codex_runner.launches) == 1
     assert len(dev_syncer.verify_calls) == 1
     assert len(dev_syncer.cleanup_calls) == 1
 
@@ -2617,7 +2621,7 @@ def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
 
 
 def test_pr_opened_without_issue_reference_queues_single_review_round(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -2642,7 +2646,7 @@ def test_pr_opened_without_issue_reference_queues_single_review_round(tmp_path: 
     assert review_jobs[0].issue_number is None
     assert review_jobs[0].metadata.get("untracked") is True
     assert review_jobs[0].metadata.get("external_contribution") is True
-    assert omx_runner.launches[-1]["job"].stage == "review_round"
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
 
 
 def test_untracked_external_pr_caps_at_one_review_round(tmp_path: Path) -> None:
@@ -2690,7 +2694,7 @@ def test_untracked_external_pr_caps_at_one_review_round(tmp_path: Path) -> None:
 
 
 def test_untracked_external_pr_review_round_does_not_spawn_implementation(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     service.handle_event(
         NormalizedEvent(
@@ -2729,12 +2733,12 @@ def test_untracked_external_pr_review_round_does_not_spawn_implementation(tmp_pa
 
     assert result == {"status": "ignored", "reason": "untracked_pr"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
-    assert all(launch["job"].stage != "implementation" for launch in omx_runner.launches)
+    assert all(launch["job"].stage != "implementation" for launch in codex_runner.launches)
 
 
 def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
     """Review-round agent event for a PR with no traceable issue is dropped."""
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     review_event = NormalizedEvent(
         kind="pull_request_comment",
@@ -2751,12 +2755,12 @@ def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
 
     assert result == {"status": "ignored", "reason": "untracked_pr"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_implementation_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
     """Implementation agent event for a PR with no traceable issue is dropped."""
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     impl_event = NormalizedEvent(
         kind="pull_request_comment",
@@ -2774,10 +2778,10 @@ def test_implementation_without_issue_drops_untracked_pr(tmp_path: Path) -> None
     assert result == {"status": "ignored", "reason": "untracked_pr"}
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="final_verdict", pr_number=42) == []
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
-class MissingIssueCommentRunner(FakeOmxRunner):
+class MissingIssueCommentRunner(FakeCodexRunner):
     def __init__(self, github: FakeGitHubCLI, *, recover: bool = True, resumable: bool = True) -> None:
         super().__init__(github)
         self.recover = recover
@@ -2797,20 +2801,20 @@ class MissingIssueCommentRunner(FakeOmxRunner):
                 issue_number=job.issue_number,
                 pr_number=job.pr_number,
                 review_round=job.review_round,
-                omx_session_id=f"omx-{job.id}" if self.resumable else None,
+                codex_session_id=f"codex-{job.id}" if self.resumable else None,
             )
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"} and self.recover:
             self._post_recovery_signature(job)
         return super().launch(repo_path, job, prompt)
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str):
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str):
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"} and self.recover:
             self._post_recovery_signature(job)
         self.resumes.append({
             "repo_path": str(repo_path),
             "job": job,
             "prompt": prompt,
-            "omx_session_id": omx_session_id,
+            "codex_session_id": codex_session_id,
         })
         return SessionRecord(
             repo_full_name=job.repo_full_name,
@@ -2823,7 +2827,7 @@ class MissingIssueCommentRunner(FakeOmxRunner):
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
         )
 
     def can_resume(self, session_id: str) -> bool:
@@ -2844,20 +2848,20 @@ def make_missing_comment_service(
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = MissingIssueCommentRunner(github, recover=recover, resumable=resumable)
+    codex_runner = MissingIssueCommentRunner(github, recover=recover, resumable=resumable)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, omx_runner
+    return service, github, codex_runner
 
 
 def test_issue_request_missing_signature_recovers_with_original_signature(tmp_path: Path) -> None:
-    service, github, omx_runner = make_missing_comment_service(tmp_path)
+    service, github, codex_runner = make_missing_comment_service(tmp_path)
 
     service.handle_event(
         NormalizedEvent(
@@ -2886,7 +2890,7 @@ def test_issue_request_missing_signature_recovers_with_original_signature(tmp_pa
     assert recovery_job.metadata["source_job_id"] == source_job.id
     assert recovery_job.metadata["expected_signature"] == expected_signature
     assert github.find_comments_by_signature("acme/demo", 40, kind="issue", signature_fragment=expected_signature)
-    recovery_prompt = omx_runner.resumes[-1]["prompt"]
+    recovery_prompt = codex_runner.resumes[-1]["prompt"]
     assert expected_signature in recovery_prompt
     assert "Do not write code" in recovery_prompt
     assert "GitHub issue comment exactly once" in recovery_prompt
@@ -2921,7 +2925,7 @@ def test_issue_request_recovery_failure_is_bounded_and_records_details(tmp_path:
 
 
 def test_issue_request_recovery_uses_fresh_launch_when_original_session_cannot_resume(tmp_path: Path) -> None:
-    service, _, omx_runner = make_missing_comment_service(tmp_path, resumable=False)
+    service, _, codex_runner = make_missing_comment_service(tmp_path, resumable=False)
 
     service.handle_event(
         NormalizedEvent(
@@ -2937,8 +2941,8 @@ def test_issue_request_recovery_uses_fresh_launch_when_original_session_cannot_r
     )
     service.wait_for_idle()
 
-    assert not omx_runner.resumes
-    assert [record["job"].stage for record in omx_runner.launches] == ["issue_request", "issue_request_recovery"]
+    assert not codex_runner.resumes
+    assert [record["job"].stage for record in codex_runner.launches] == ["issue_request", "issue_request_recovery"]
     source_job, recovery_job = service.storage.list_jobs()
     assert source_job.status == "completed"
     assert recovery_job.status == "completed"
@@ -2971,7 +2975,7 @@ def test_missing_issue_comment_recovery_is_not_duplicated_for_same_job(tmp_path:
 
 
 def test_issue_followup_missing_signature_recovers_with_original_signature(tmp_path: Path) -> None:
-    service, github, omx_runner = make_service(tmp_path)
+    service, github, codex_runner = make_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -2985,7 +2989,7 @@ def test_issue_followup_missing_signature_recovers_with_original_signature(tmp_p
         )
     )
     service.wait_for_idle()
-    omx_runner.resume_error = RuntimeError("issue-followup-comment-missing")
+    codex_runner.resume_error = RuntimeError("issue-followup-comment-missing")
 
     service.handle_event(
         NormalizedEvent(
@@ -3009,21 +3013,21 @@ def test_issue_followup_missing_signature_recovers_with_original_signature(tmp_p
     assert recovery_job.status == "completed"
     assert recovery_job.metadata["expected_signature"] == expected_signature
     assert github.find_comments_by_signature("acme/demo", 43, kind="issue", signature_fragment=expected_signature)
-    assert expected_signature in omx_runner.launches[-1]["prompt"]
+    assert expected_signature in codex_runner.launches[-1]["prompt"]
 
 
 class ResumeExceptionAfterPostingRecoveryRunner(MissingIssueCommentRunner):
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str):
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str):
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
             self._post_recovery_signature(job)
             self.resumes.append({
                 "repo_path": str(repo_path),
                 "job": job,
                 "prompt": prompt,
-                "omx_session_id": omx_session_id,
+                "codex_session_id": codex_session_id,
             })
             raise RuntimeError("resume raised after posting signature")  # noqa: TRY003
-        return super().resume(repo_path, job, prompt, omx_session_id)
+        return super().resume(repo_path, job, prompt, codex_session_id)
 
 
 class ResumeWaitFailureRecoveryRunner(MissingIssueCommentRunner):
@@ -3032,10 +3036,10 @@ class ResumeWaitFailureRecoveryRunner(MissingIssueCommentRunner):
         self._fail_next_resume_wait = False
         self.post_before_failure = post_before_failure
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str):
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str):
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"} and self.post_before_failure:
             self._post_recovery_signature(job)
-        session = super().resume(repo_path, job, prompt, omx_session_id)
+        session = super().resume(repo_path, job, prompt, codex_session_id)
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
             self._fail_next_resume_wait = True
         return session
@@ -3062,36 +3066,36 @@ class RecoveryTransientFailureRunner(MissingIssueCommentRunner):
             self.set_transient_failures(1)
         return session
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str):
-        session = super().resume(repo_path, job, prompt, omx_session_id)
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str):
+        session = super().resume(repo_path, job, prompt, codex_session_id)
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
             self.set_transient_failures(1)
         return session
 
 
 class CommentRecoveryRuntimeRunner(FakeRuntimeRunner):
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str) -> SessionRecord:
         if job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
             expected_signature = str(job.metadata["expected_signature"])
             self.github.add_issue_signature(job.repo_full_name, int(job.issue_number or 0), expected_signature)
-        return super().resume(repo_path, job, prompt, omx_session_id)
+        return super().resume(repo_path, job, prompt, codex_session_id)
 
 
-def test_issue_request_recovery_resumes_source_effective_omx_session_when_preferred_runtime_is_omo(
+def test_issue_request_recovery_resumes_source_effective_codex_session_when_preferred_runtime_is_omo(
     tmp_path: Path,
 ) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     omo_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMO)
-    omx_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    codex_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omo_runner),
+        codex_runner=cast(AgentRunner, omo_runner),
         dev_syncer=FakeGitDevSyncer(),
-        runtime_runners={RUNTIME_OMX: cast(AgentRunner, omx_runner)},
+        runtime_runners={RUNTIME_CODEX: cast(AgentRunner, codex_runner)},
     )
     service.register_repo("acme/demo", str(tmp_path))
     repo = service.storage.get_repo("acme/demo")
@@ -3105,7 +3109,7 @@ def test_issue_request_recovery_resumes_source_effective_omx_session_when_prefer
             "title": "Need planning",
             "body": "Need planning",
             "preferred_runtime": RUNTIME_OMO,
-            "effective_runtime": RUNTIME_OMX,
+            "effective_runtime": RUNTIME_CODEX,
         },
     )
     service.storage.create_job(source_job)
@@ -3113,16 +3117,16 @@ def test_issue_request_recovery_resumes_source_effective_omx_session_when_prefer
         SessionRecord(
             repo_full_name="acme/demo",
             stage="issue_request",
-            runtime_handle=f"omx-runtime-{source_job.id}",
+            runtime_handle=f"codex-runtime-{source_job.id}",
             prompt_path=str(tmp_path / "prompt.txt"),
             script_path=str(tmp_path / "run.sh"),
             worktree_path=str(tmp_path),
             job_id=source_job.id,
             issue_number=48,
-            omx_session_id="omx-original",
+            codex_session_id="codex-original",
             preferred_runtime=RUNTIME_OMO,
-            effective_runtime=RUNTIME_OMX,
-            native_session_runtime=RUNTIME_OMX,
+            effective_runtime=RUNTIME_CODEX,
+            native_session_runtime=RUNTIME_CODEX,
         )
     )
     service.queue_manager.submit = lambda queued_job: None  # type: ignore[method-assign]
@@ -3134,11 +3138,11 @@ def test_issue_request_recovery_resumes_source_effective_omx_session_when_prefer
 
     assert omo_runner.resumes == []
     assert omo_runner.launches == []
-    assert [record["omx_session_id"] for record in omx_runner.resumes] == ["omx-original"]
-    assert omx_runner.launches == []
+    assert [record["codex_session_id"] for record in codex_runner.resumes] == ["codex-original"]
+    assert codex_runner.launches == []
     assert recovery_job.metadata["preferred_runtime"] == RUNTIME_OMO
-    assert recovery_job.metadata["source_effective_runtime"] == RUNTIME_OMX
-    assert recovery_job.metadata["effective_runtime"] == RUNTIME_OMX
+    assert recovery_job.metadata["source_effective_runtime"] == RUNTIME_CODEX
+    assert recovery_job.metadata["effective_runtime"] == RUNTIME_CODEX
 
 
 def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue_session_exists(
@@ -3147,12 +3151,12 @@ def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMX)
+    codex_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3184,10 +3188,10 @@ def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue
             worktree_path=str(tmp_path),
             job_id=source_job.id,
             issue_number=49,
-            omx_session_id="omx-source",
-            preferred_runtime=RUNTIME_OMX,
-            effective_runtime=RUNTIME_OMX,
-            native_session_runtime=RUNTIME_OMX,
+            codex_session_id="codex-source",
+            preferred_runtime=RUNTIME_CODEX,
+            effective_runtime=RUNTIME_CODEX,
+            native_session_runtime=RUNTIME_CODEX,
         )
     )
     service.storage.create_session(
@@ -3200,10 +3204,10 @@ def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue
             worktree_path=str(tmp_path),
             job_id=newer_job.id,
             issue_number=49,
-            omx_session_id="omx-newer",
-            preferred_runtime=RUNTIME_OMX,
-            effective_runtime=RUNTIME_OMX,
-            native_session_runtime=RUNTIME_OMX,
+            codex_session_id="codex-newer",
+            preferred_runtime=RUNTIME_CODEX,
+            effective_runtime=RUNTIME_CODEX,
+            native_session_runtime=RUNTIME_CODEX,
         )
     )
     service.queue_manager.submit = lambda queued_job: None  # type: ignore[method-assign]
@@ -3213,21 +3217,21 @@ def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue
 
     service._run_comment_recovery_attempt(repo, recovery_job)
 
-    assert [record["omx_session_id"] for record in omx_runner.resumes] == ["omx-source"]
+    assert [record["codex_session_id"] for record in codex_runner.resumes] == ["codex-source"]
     assert recovery_job.metadata["source_job_id"] == source_job.id
-    assert recovery_job.metadata["source_omx_session_id"] == "omx-source"
+    assert recovery_job.metadata["source_codex_session_id"] == "codex-source"
 
 
 def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_fails(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = ResumeWaitFailureRecoveryRunner(github)
+    codex_runner = ResumeWaitFailureRecoveryRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3249,8 +3253,8 @@ def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_
     source_job, recovery_job = service.storage.list_jobs()
     assert source_job.status == "completed"
     assert recovery_job.status == "completed"
-    assert [record["job"].stage for record in omx_runner.resumes] == ["issue_request_recovery"]
-    assert [record["job"].stage for record in omx_runner.launches] == ["issue_request", "issue_request_recovery"]
+    assert [record["job"].stage for record in codex_runner.resumes] == ["issue_request_recovery"]
+    assert [record["job"].stage for record in codex_runner.launches] == ["issue_request", "issue_request_recovery"]
     assert recovery_job.metadata["comment_recovery_resume_error"] == "resume failed"
 
 
@@ -3258,12 +3262,12 @@ def test_issue_request_recovery_does_not_fresh_launch_when_resume_exception_post
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = ResumeExceptionAfterPostingRecoveryRunner(github)
+    codex_runner = ResumeExceptionAfterPostingRecoveryRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3289,8 +3293,8 @@ def test_issue_request_recovery_does_not_fresh_launch_when_resume_exception_post
     )
     assert source_job.status == "completed"
     assert recovery_job.status == "completed"
-    assert [record["job"].stage for record in omx_runner.resumes] == ["issue_request_recovery"]
-    assert [record["job"].stage for record in omx_runner.launches] == ["issue_request"]
+    assert [record["job"].stage for record in codex_runner.resumes] == ["issue_request_recovery"]
+    assert [record["job"].stage for record in codex_runner.launches] == ["issue_request"]
     assert len(matching_comments) == 1
     assert recovery_job.metadata["comment_recovery_resume_error"] == "resume raised after posting signature"
     assert recovery_job.metadata["note"] == "side_effect_already_posted"
@@ -3300,12 +3304,12 @@ def test_issue_request_recovery_does_not_fresh_launch_when_failed_resume_posted_
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = ResumeWaitFailureRecoveryRunner(github, post_before_failure=True)
+    codex_runner = ResumeWaitFailureRecoveryRunner(github, post_before_failure=True)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3331,8 +3335,8 @@ def test_issue_request_recovery_does_not_fresh_launch_when_failed_resume_posted_
     )
     assert source_job.status == "completed"
     assert recovery_job.status == "completed"
-    assert [record["job"].stage for record in omx_runner.resumes] == ["issue_request_recovery"]
-    assert [record["job"].stage for record in omx_runner.launches] == ["issue_request"]
+    assert [record["job"].stage for record in codex_runner.resumes] == ["issue_request_recovery"]
+    assert [record["job"].stage for record in codex_runner.launches] == ["issue_request"]
     assert len(matching_comments) == 1
     assert recovery_job.metadata["comment_recovery_resume_error"] == "resume failed"
     assert recovery_job.metadata["note"] == "side_effect_already_posted"
@@ -3344,12 +3348,12 @@ def test_recovery_transient_exhaustion_fails_source_job_with_recovery_metadata(
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = RecoveryTransientFailureRunner(github, recover=False)
+    codex_runner = RecoveryTransientFailureRunner(github, recover=False)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3385,7 +3389,7 @@ def test_service_rehydrates_queued_jobs_on_startup(tmp_path: Path) -> None:
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     first_service.register_repo("acme/demo", str(tmp_path))
@@ -3397,12 +3401,12 @@ def test_service_rehydrates_queued_jobs_on_startup(tmp_path: Path) -> None:
     )
     storage.create_job(queued)
 
-    runner = FakeOmxRunner(github)
+    runner = FakeCodexRunner(github)
     restarted = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, runner),
+        codex_runner=cast(AgentRunner, runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     restarted.wait_for_idle()
@@ -3419,7 +3423,7 @@ def test_service_recovers_launched_jobs_on_startup(tmp_path: Path) -> None:
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     first_service.register_repo("acme/demo", str(tmp_path))
@@ -3433,12 +3437,12 @@ def test_service_recovers_launched_jobs_on_startup(tmp_path: Path) -> None:
     )
     storage.create_job(launched)
 
-    runner = FakeOmxRunner(github)
+    runner = FakeCodexRunner(github)
     restarted = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, runner),
+        codex_runner=cast(AgentRunner, runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     restarted.wait_for_idle()
@@ -3459,7 +3463,7 @@ def test_service_completes_launched_job_on_startup_when_side_effect_exists(tmp_p
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     first_service.register_repo("acme/demo", str(tmp_path))
@@ -3474,12 +3478,12 @@ def test_service_completes_launched_job_on_startup_when_side_effect_exists(tmp_p
     storage.create_job(launched)
     github.add_issue_signature("acme/demo", 79, build_signature(stage="issue_request", job=launched.id, issue=79))
 
-    runner = FakeOmxRunner(github)
+    runner = FakeCodexRunner(github)
     restarted = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, runner),
+        codex_runner=cast(AgentRunner, runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     restarted.wait_for_idle()
@@ -3492,7 +3496,7 @@ def test_service_completes_launched_job_on_startup_when_side_effect_exists(tmp_p
 
 
 def test_job_status_is_launched_while_runner_waits(tmp_path: Path) -> None:
-    class BlockingWaitRunner(FakeOmxRunner):
+    class BlockingWaitRunner(FakeCodexRunner):
         def __init__(self, github: FakeGitHubCLI, storage: JsonStorage) -> None:
             super().__init__(github)
             self.storage = storage
@@ -3516,7 +3520,7 @@ def test_job_status_is_launched_while_runner_waits(tmp_path: Path) -> None:
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, runner),
+        codex_runner=cast(AgentRunner, runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3552,7 +3556,7 @@ def test_launched_dev_sync_is_requeued_on_startup(tmp_path: Path) -> None:
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     first_service.register_repo("acme/demo", str(tmp_path))
@@ -3569,7 +3573,7 @@ def test_launched_dev_sync_is_requeued_on_startup(tmp_path: Path) -> None:
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     ).wait_for_idle()
 
@@ -3588,7 +3592,7 @@ def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Pat
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, FakeOmxRunner(github)),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
         dev_syncer=FakeGitDevSyncer(),
     )
     first_service.register_repo("acme/demo", str(tmp_path))
@@ -3618,12 +3622,12 @@ def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Pat
     storage.create_job(recovery)
     github.add_issue_signature("acme/demo", 81, expected_signature)
 
-    runner = FakeOmxRunner(github)
+    runner = FakeCodexRunner(github)
     DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, runner),
+        codex_runner=cast(AgentRunner, runner),
         dev_syncer=FakeGitDevSyncer(),
     ).wait_for_idle()
 
@@ -3641,12 +3645,12 @@ def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_timeout_seconds=5400)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omx_runner = FakeOmxRunner(github)
+    codex_runner = FakeCodexRunner(github)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        omx_runner=cast(AgentRunner, omx_runner),
+        codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=FakeGitDevSyncer(),
     )
     service.register_repo("acme/demo", str(tmp_path))
@@ -3665,11 +3669,11 @@ def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
     )
     service.wait_for_idle()
 
-    assert omx_runner.wait_calls[-1]["timeout_seconds"] == 5400
+    assert codex_runner.wait_calls[-1]["timeout_seconds"] == 5400
 
 
 def test_issue_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -3687,12 +3691,12 @@ def test_issue_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "issue_closed"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
 
 
 def test_issue_opened_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.storage.mark_terminal_issue("acme/demo", 58)
 
     result = service.handle_event(
@@ -3710,12 +3714,12 @@ def test_issue_opened_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> No
     )
 
     assert result == {"status": "ignored", "reason": "issue_terminal"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
 
 
 def test_issue_reopened_action_is_no_op(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -3732,11 +3736,11 @@ def test_issue_reopened_action_is_no_op(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "issue_reopened_no_op"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_approve_on_closed_issue_does_not_queue_implementation(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -3754,12 +3758,12 @@ def test_approve_on_closed_issue_does_not_queue_implementation(tmp_path: Path) -
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "issue_closed"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
     assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=12) == []
 
 
 def test_approve_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.storage.mark_terminal_issue("acme/demo", 12)
 
     result = service.handle_event(
@@ -3777,11 +3781,11 @@ def test_approve_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "issue_terminal"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_second_approve_for_same_issue_is_deduplicated(tmp_path: Path) -> None:
-    service, _, _omx_runner = make_service(tmp_path)
+    service, _, _codex_runner = make_service(tmp_path)
     base_event = NormalizedEvent(
         kind="issue_comment",
         repo_full_name="acme/demo",
@@ -3807,7 +3811,7 @@ def test_second_approve_for_same_issue_is_deduplicated(tmp_path: Path) -> None:
 
 
 def test_followup_from_dani_bot_login_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.config.bot_login = "danibot[bot]"
 
     result = service.handle_event(
@@ -3827,12 +3831,12 @@ def test_followup_from_dani_bot_login_is_ignored(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "self_authored_comment"}
-    assert omx_runner.launches == []
-    assert omx_runner.resumes == []
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []
 
 
 def test_followup_with_actor_type_bot_is_ignored_when_bot_login_unset(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     assert service.config.bot_login is None
 
     result = service.handle_event(
@@ -3851,11 +3855,11 @@ def test_followup_with_actor_type_bot_is_ignored_when_bot_login_unset(tmp_path: 
     )
 
     assert result == {"status": "ignored", "reason": "self_authored_comment"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_followup_short_circuits_after_max_rounds(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
     assert repo is not None
     for _ in range(service.config.max_issue_followups):
@@ -3884,12 +3888,12 @@ def test_followup_short_circuits_after_max_rounds(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "max_followups_reached"}
-    assert omx_runner.launches == []
-    assert omx_runner.resumes == []
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []
 
 
 def test_followup_on_closed_issue_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
         NormalizedEvent(
@@ -3907,11 +3911,11 @@ def test_followup_on_closed_issue_is_ignored(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "issue_closed"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_followup_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.storage.mark_terminal_issue("acme/demo", 25)
 
     result = service.handle_event(
@@ -3930,11 +3934,11 @@ def test_followup_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
     )
 
     assert result == {"status": "ignored", "reason": "issue_terminal"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_pull_request_opened_with_merged_state_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     event = make_pr_event(pr_number=88, action="synchronize", body="Implements #21")
     event.pr_state = "closed"
     event.pr_merged = True
@@ -3943,11 +3947,11 @@ def test_pull_request_opened_with_merged_state_is_ignored(tmp_path: Path) -> Non
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "pr_merged"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_pull_request_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     event = make_pr_event(pr_number=89, action="synchronize", body="Implements #22")
     event.pr_state = "closed"
     event.pr_merged = False
@@ -3956,11 +3960,11 @@ def test_pull_request_opened_with_closed_state_is_ignored(tmp_path: Path) -> Non
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "pr_not_open"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_pull_request_opened_after_terminal_pr_flag_is_ignored(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
     service.storage.mark_terminal_pr("acme/demo", 90, merged=True)
     event = make_pr_event(pr_number=90, action="opened", body="Implements #23")
 
@@ -3968,7 +3972,7 @@ def test_pull_request_opened_after_terminal_pr_flag_is_ignored(tmp_path: Path) -
     service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "pr_terminal"}
-    assert omx_runner.launches == []
+    assert codex_runner.launches == []
 
 
 def test_pull_request_closed_merged_marks_terminal_pr_and_issue(tmp_path: Path) -> None:
@@ -4026,7 +4030,7 @@ def test_pull_request_closed_unmerged_marks_only_pr(tmp_path: Path) -> None:
 
 
 def test_followup_after_pr_merged_is_short_circuited_end_to_end(tmp_path: Path) -> None:
-    service, _, omx_runner = make_service(tmp_path)
+    service, _, codex_runner = make_service(tmp_path)
 
     service.handle_event(
         NormalizedEvent(
@@ -4062,5 +4066,5 @@ def test_followup_after_pr_merged_is_short_circuited_end_to_end(tmp_path: Path) 
     )
 
     assert followup_result == {"status": "ignored", "reason": "issue_terminal"}
-    assert omx_runner.launches == []
-    assert omx_runner.resumes == []
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []

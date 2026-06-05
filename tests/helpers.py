@@ -197,10 +197,10 @@ class ResumeRecord(TypedDict):
     repo_path: str
     job: JobRecord
     prompt: str
-    omx_session_id: str
+    codex_session_id: str
 
 
-class FakeOmxRunner:
+class FakeCodexRunner:
     def __init__(self, github: FakeGitHubCLI) -> None:
         self.github = github
         self.launches: list[LaunchRecord] = []
@@ -222,7 +222,7 @@ class FakeOmxRunner:
         matches = re.findall(r"<!--\s*dani:([^>]+)\s*-->", prompt)
         signature = parse_signature(f"<!-- dani:{matches[-1]} -->") if matches else None
         # If next wait() will raise TransientCapacityError, skip posting side effects
-        # to simulate the OMX session failing before it could post anything.
+        # to simulate the Codex session failing before it could post anything.
         if self._transient_failures_remaining == 0:
             self._post_side_effect(repo_full_name, job, signature)
         self.launches.append({"repo_path": str(repo_path), "job": job, "prompt": prompt})
@@ -237,7 +237,7 @@ class FakeOmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=f"omx-{job.id}",
+            codex_session_id=f"codex-{job.id}",
         )
 
     def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
@@ -289,7 +289,7 @@ class FakeOmxRunner:
         if isinstance(expected_signature, str) and expected_signature:
             self.github.add_issue_signature(repo_full_name, job.issue_number or 0, expected_signature)
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str) -> SessionRecord:
         if self.resume_error is not None:
             raise self.resume_error
         issue_number = job.issue_number or 0
@@ -302,7 +302,7 @@ class FakeOmxRunner:
             "repo_path": str(repo_path),
             "job": job,
             "prompt": prompt,
-            "omx_session_id": omx_session_id,
+            "codex_session_id": codex_session_id,
         })
         return SessionRecord(
             repo_full_name=job.repo_full_name,
@@ -315,7 +315,7 @@ class FakeOmxRunner:
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
         )
 
     def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:
@@ -340,11 +340,11 @@ class FakeOmxRunner:
         return bool(session_id) and not session_id.startswith("ses_")
 
 
-class FakeRuntimeRunner(FakeOmxRunner):
+class FakeRuntimeRunner(FakeCodexRunner):
     def __init__(self, github: FakeGitHubCLI, *, runtime_name: str) -> None:
         super().__init__(github)
         self.runtime_name = runtime_name
-        self.session_id_prefix = "ses_" if runtime_name == "omo" else "omx-"
+        self.session_id_prefix = "ses_" if runtime_name == "omo" else "codex-"
         self.wait_errors: list[Exception] = []
 
     def queue_wait_error(self, exc: Exception) -> None:
@@ -370,10 +370,10 @@ class FakeRuntimeRunner(FakeOmxRunner):
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=f"{self.session_id_prefix}{job.id}",
+            codex_session_id=f"{self.session_id_prefix}{job.id}",
         )
 
-    def resume(self, repo_path: Path, job: JobRecord, prompt: str, omx_session_id: str) -> SessionRecord:
+    def resume(self, repo_path: Path, job: JobRecord, prompt: str, codex_session_id: str) -> SessionRecord:
         if self.resume_error is not None:
             raise self.resume_error
         issue_number = job.issue_number or 0
@@ -386,7 +386,7 @@ class FakeRuntimeRunner(FakeOmxRunner):
             "repo_path": str(repo_path),
             "job": job,
             "prompt": prompt,
-            "omx_session_id": omx_session_id,
+            "codex_session_id": codex_session_id,
         })
         return SessionRecord(
             repo_full_name=job.repo_full_name,
@@ -399,7 +399,7 @@ class FakeRuntimeRunner(FakeOmxRunner):
             issue_number=job.issue_number,
             pr_number=job.pr_number,
             review_round=job.review_round,
-            omx_session_id=omx_session_id,
+            codex_session_id=codex_session_id,
         )
 
     def wait(self, runtime_handle: str, *, poll_interval: float = 0.5, timeout_seconds: float = 1800) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-RUNTIME_OMX = "omx"
+RUNTIME_CODEX = "codex"
 RUNTIME_OMO = "omo"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 3600.0
 
@@ -20,7 +20,7 @@ def infer_runtime_from_session_id(session_id: str | None) -> str | None:
         return None
     if session_id.startswith("ses_"):
         return RUNTIME_OMO
-    return RUNTIME_OMX
+    return RUNTIME_CODEX
 
 
 @dataclass(slots=True)
@@ -66,7 +66,7 @@ class SessionRecord:
     issue_number: int | None = None
     pr_number: int | None = None
     review_round: int | None = None
-    omx_session_id: str | None = None
+    codex_session_id: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
     preferred_runtime: str | None = None
@@ -91,7 +91,7 @@ def effective_session_runtime(session: SessionRecord) -> str | None:
         return session.effective_runtime
     if session.native_session_runtime:
         return session.native_session_runtime
-    return infer_runtime_from_session_id(session.omx_session_id)
+    return infer_runtime_from_session_id(session.codex_session_id)
 
 
 @dataclass(slots=True)
@@ -126,7 +126,7 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
-    agent_runtime: str = "omx"
+    agent_runtime: str = "codex"
     agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
     bot_login: str | None = None
     max_issue_followups: int = DEFAULT_MAX_ISSUE_FOLLOWUPS
