@@ -18,6 +18,10 @@ from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeOmxRunner, FakeRu
 TEST_SECRET = "unit-test-secret"
 
 
+class _GitHubOutageError(RuntimeError):
+    pass
+
+
 def add_exact_review_signature(github: FakeGitHubCLI, job: JobRecord) -> None:
     signature_fields: dict[str, str | int] = {
         "stage": "review_round",
@@ -405,9 +409,10 @@ def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_
     omx_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMX)
     omo_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
 
-    assert "$ralph" in omx_prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in omx_prompt
+    assert "$ralph" not in omx_prompt
     assert "$ralph" not in omo_prompt
-    assert "ultrawork" in omo_prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in omo_prompt
 
 
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
@@ -1689,8 +1694,6 @@ def test_duplicate_final_verdict_event_is_ignored(tmp_path: Path) -> None:
 
 def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> None:
     """A transient merge failure must not poison redelivery — the retry must succeed."""
-    from github.GithubException import GithubException
-
     service, github, _omx_runner = make_service(tmp_path)
     service.storage.create_job(
         JobRecord(
@@ -1713,7 +1716,7 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
     original_merge = github.merge_pull_request
 
     def boom(repo_full_name: str, pr_number: int) -> None:
-        raise GithubException(500, {"message": "GitHub outage"}, {})
+        raise _GitHubOutageError
 
     github.merge_pull_request = boom  # type: ignore[assignment]
     event = NormalizedEvent(
@@ -1728,7 +1731,7 @@ def test_final_verdict_transient_failure_allows_redelivery(tmp_path: Path) -> No
         is_pull_request=True,
     )
 
-    with pytest.raises(GithubException):
+    with pytest.raises(_GitHubOutageError):
         service.handle_event(event)
 
     # Restore normal merge and redeliver the same event

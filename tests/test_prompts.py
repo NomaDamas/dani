@@ -3,7 +3,7 @@ import pytest
 from dani.prompts import render_prompt
 
 
-def test_implementation_prompt_keeps_ralph_literal() -> None:
+def test_implementation_prompt_uses_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -21,11 +21,12 @@ def test_implementation_prompt_keeps_ralph_literal() -> None:
         },
     )
 
-    assert "$ralph" in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert "$ralph" not in prompt
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
-def test_implementation_prompt_for_omo_replaces_ralph_with_ultrawork() -> None:
+def test_implementation_prompt_for_omo_keeps_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -45,10 +46,10 @@ def test_implementation_prompt_for_omo_replaces_ralph_with_ultrawork() -> None:
     )
 
     assert "$ralph" not in prompt
-    assert "ultrawork" in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
 
 
-def test_implementation_prompt_for_omx_explicit_runtime_still_keeps_ralph() -> None:
+def test_implementation_prompt_for_omx_explicit_runtime_uses_ulw_loop_skill_invocation() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -67,7 +68,8 @@ def test_implementation_prompt_for_omx_explicit_runtime_still_keeps_ralph() -> N
         runtime="omx",
     )
 
-    assert "$ralph" in prompt
+    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert "$ralph" not in prompt
 
 
 def test_implementation_prompt_prefers_push_over_pr_edit_for_existing_pr() -> None:
@@ -337,13 +339,14 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
         },
     )
 
-    assert "$code-review" in prompt
+    assert "$code-review" not in prompt
+    assert "Use Codex's normal code review judgment" in prompt
     assert "actual verification" in prompt.lower()
     assert "concrete evidence appropriate for what you verified" in prompt
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
-def test_review_round_prompt_for_omo_delegates_to_momus_plan_critic() -> None:
+def test_review_round_prompt_for_omo_uses_plain_codex_review_guidance() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -359,8 +362,8 @@ def test_review_round_prompt_for_omo_delegates_to_momus_plan_critic() -> None:
     )
 
     assert "$code-review" not in prompt
-    assert "Momus-Plan-Critic" in prompt
-    assert "subagent" in prompt.lower()
+    assert "Momus-Plan-Critic" not in prompt
+    assert "Use Codex's normal code review judgment" in prompt
 
 
 def test_review_round_prompt_for_omo_does_not_mention_ralph_command() -> None:

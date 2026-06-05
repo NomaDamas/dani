@@ -4,6 +4,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import dani.cli as cli_module
+from dani.agent_runner import normalize_runtime
 from dani.cli import app
 from dani.models import JobRecord
 
@@ -95,3 +96,18 @@ def test_build_config_agent_timeout_env_overrides_config_file(tmp_path: Path, mo
     config = cli_module.build_config(data_dir)
 
     assert config.agent_timeout_seconds == 5400
+
+
+def test_build_config_defaults_to_codex_runtime(tmp_path: Path, monkeypatch) -> None:
+    data_dir = tmp_path / ".dani"
+    monkeypatch.delenv("DANI_AGENT_RUNTIME", raising=False)
+
+    config = cli_module.build_config(data_dir)
+
+    assert config.agent_runtime == "codex"
+
+
+def test_normalize_runtime_treats_omx_as_legacy_codex_alias() -> None:
+    assert normalize_runtime(None) == "codex"
+    assert normalize_runtime("codex") == "codex"
+    assert normalize_runtime("omx") == "codex"

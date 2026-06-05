@@ -6,19 +6,9 @@ from typing import Protocol, TextIO, cast, runtime_checkable
 from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
 
 RUNTIME_ALIASES: dict[str, str] = {
-    "omx": "omx",
-    "oh-my-codex": "omx",
-    "codex": "omx",
-    "omo": "omo",
-    "oh-my-openagents": "omo",
-    "oh-my-openagent": "omo",
-    "opencode": "omo",
-}
-
-RUNTIME_ALIASES: dict[str, str] = {
-    "omx": "omx",
-    "oh-my-codex": "omx",
-    "codex": "omx",
+    "codex": "codex",
+    "oh-my-codex": "codex",
+    "omx": "codex",
     "omo": "omo",
     "oh-my-openagents": "omo",
     "oh-my-openagent": "omo",
@@ -40,7 +30,7 @@ ProcessEntry = tuple[ManagedProcess, TextIO, TextIO]
 class AgentRunner(Protocol):
     """Protocol every dani agent runtime adapter must satisfy.
 
-    Implementations wrap an external agent CLI (omx, opencode, ...) and expose
+    Implementations wrap an external agent CLI (codex, opencode, ...) and expose
     a uniform interface to ``DaniService`` for launching a new agent session,
     resuming an existing one, waiting for completion, and releasing process
     resources.
@@ -74,22 +64,22 @@ class AgentRunner(Protocol):
 
 
 def normalize_runtime(runtime: str | None) -> str:
-    normalized = (runtime or "omx").strip().lower()
+    normalized = (runtime or "codex").strip().lower()
     if normalized in RUNTIME_ALIASES:
         return RUNTIME_ALIASES[normalized]
-    msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
+    msg = f"unknown agent runtime: {runtime!r} (expected 'codex' or 'omo')"
     raise ValueError(msg)
 
 
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
-    """Factory returning the AgentRunner matching *runtime* (``omx`` or ``omo``)."""
+    """Factory returning the AgentRunner matching *runtime* (``codex`` or ``omo``)."""
     from dani.omo_http_runner import OmoHttpRunner
     from dani.omx_runner import OmxRunner
 
     normalized = normalize_runtime(runtime)
-    if normalized == "omx":
+    if normalized == "codex":
         return cast(AgentRunner, OmxRunner(run_dir))
     if normalized == "omo":
         return cast(AgentRunner, OmoHttpRunner(run_dir))
-    msg = f"unknown agent runtime: {runtime!r} (expected 'omx' or 'omo')"
+    msg = f"unknown agent runtime: {runtime!r} (expected 'codex' or 'omo')"
     raise ValueError(msg)

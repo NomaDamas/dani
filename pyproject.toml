@@ -1,7 +1,7 @@
 [project]
 name = "dani"
 version = "0.0.1"
-description = "Simple loop for managing Github Repository; Backend is Oh-My-Codex or Oh-My-OpenAgents"
+description = "Simple loop for managing Github Repository; Backend is Codex or Oh-My-OpenAgents"
 authors = [{ name = "NomaDamas", email = "vkehfdl1@gmail.com" }]
 readme = "README.md"
 keywords = ["python"]

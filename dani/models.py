@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-RUNTIME_OMX = "omx"
+RUNTIME_OMX = "codex"
 RUNTIME_OMO = "omo"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 3600.0
 
@@ -119,7 +119,7 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
-    agent_runtime: str = "omx"
+    agent_runtime: str = "codex"
     agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
 
     @property

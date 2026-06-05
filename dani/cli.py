@@ -11,7 +11,7 @@ from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, DaniConfig
 from dani.server import create_app
 from dani.service import DaniService
 
-app = typer.Typer(help="Simple GitHub webhook -> OMX automation loop.")
+app = typer.Typer(help="Simple GitHub webhook -> Codex automation loop.")
 DEFAULT_DATA_DIR = Path.home() / ".dani"
 DATA_DIR_OPTION = typer.Option(DEFAULT_DATA_DIR, help="Directory for dani state files.")
 HOST_OPTION = typer.Option("127.0.0.1", help="Bind host.")
@@ -60,7 +60,7 @@ def _resolve_agent_timeout_seconds(config_payload: dict[str, object]) -> float:
 def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> DaniConfig:
     config_payload = _load_config_file(data_dir)
     secret = os.environ.get("DANI_WEBHOOK_SECRET", "")
-    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "omx"))
+    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "codex"))
     agent_timeout_seconds = _resolve_agent_timeout_seconds(config_payload)
     return DaniConfig(
         data_dir=data_dir,

@@ -117,7 +117,7 @@ class OmxRunner:
             "#!/bin/sh\n"
             "set -eu\n"
             f"cd {quoted_repo}\n"
-            f'exec omx exec --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
+            f'exec codex exec --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
         )
 
     def _build_resume_script(self, *, repo_path: Path, prompt_path: Path, omx_session_id: str) -> str:
@@ -128,7 +128,7 @@ class OmxRunner:
             "#!/bin/sh\n"
             "set -eu\n"
             f"cd {quoted_repo}\n"
-            f'exec omx exec resume {quoted_session_id} --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
+            f'exec codex exec resume {quoted_session_id} --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
         )
 
     def wait(
@@ -143,7 +143,7 @@ class OmxRunner:
         try:
             process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
-            msg = f"omx exec process did not exit before timeout: {runtime_handle}"
+            msg = f"codex exec process did not exit before timeout: {runtime_handle}"
             raise TimeoutError(msg) from exc
 
         self._check_stderr_for_transient_error(runtime_handle)

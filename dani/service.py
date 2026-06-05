@@ -1252,11 +1252,19 @@ class DaniService:
         issue_number = job.issue_number or 0
         pr_number = job.pr_number or 0
         issue_context = self._issue_metadata(repo.full_name, issue_number) if issue_number else {}
-        issue_title = issue_context.get("title", job.metadata.get("title", f"Issue #{issue_number}"))
-        issue_body = issue_context.get("body", job.metadata.get("body", ""))
+        metadata_issue_title = job.metadata.get("title")
+        issue_title = issue_context.get("title") or (
+            metadata_issue_title if isinstance(metadata_issue_title, str) else f"Issue #{issue_number}"
+        )
+        metadata_issue_body = job.metadata.get("body")
+        issue_body = issue_context.get("body") or (metadata_issue_body if isinstance(metadata_issue_body, str) else "")
         pr_snapshot = self._pull_request_metadata(repo.full_name, pr_number) if pr_number else {}
-        pr_title = pr_snapshot.get("title", job.metadata.get("title", f"PR #{pr_number}"))
-        pr_body = pr_snapshot.get("body", job.metadata.get("body", ""))
+        metadata_pr_title = job.metadata.get("title")
+        pr_title = pr_snapshot.get("title") or (
+            metadata_pr_title if isinstance(metadata_pr_title, str) else f"PR #{pr_number}"
+        )
+        metadata_pr_body = job.metadata.get("body")
+        pr_body = pr_snapshot.get("body") or (metadata_pr_body if isinstance(metadata_pr_body, str) else "")
         if job.stage == "issue_request":
             prompt = self._build_issue_request_prompt(
                 repo, job, issue_number, issue_title, issue_body, resolved_runtime
@@ -1479,7 +1487,7 @@ class DaniService:
             f"You are operating inside repository: {repo.full_name}\n"
             f"Local path: {repo.local_path}\n"
             f"Recovery task for GitHub issue #{issue_number}: {issue_title}\n\n"
-            "A previous Dani OMX session ended without leaving the required GitHub issue comment, "
+            "A previous Dani Codex session ended without leaving the required GitHub issue comment, "
             f"so side-effect verification failed with `{original_error}`.\n\n"
             "Strict recovery instructions:\n"
             "- Do not write code, edit files, create branches, open PRs, or run implementation work.\n"
@@ -1824,7 +1832,7 @@ class DaniService:
         omx_session_id = job.metadata.get("omx_session_id")
         if isinstance(omx_session_id, str) and omx_session_id:
             return omx_session_id
-        msg = "missing-omx-session-id"
+        msg = "missing-codex-session-id"
         raise RuntimeError(msg)
 
     def _queue_pull_request_review(

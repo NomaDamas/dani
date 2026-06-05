@@ -11,6 +11,36 @@ from dani.omx_runner import OmxRunner
 from dani.signatures import build_signature
 
 
+class _ActiveProcess:
+    def poll(self) -> None:
+        return None
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
+class _ExitedProcess:
+    def poll(self) -> int:
+        return 1
+
+    def terminate(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return 1
+
+    def kill(self) -> None:
+        return None
+
+
 def test_capture_omx_session_id_matches_exec_signature_and_repo_path(tmp_path: Path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()
@@ -65,16 +95,7 @@ def test_close_session_terminates_active_process(tmp_path: Path) -> None:
     stdout_file = stdout_path.open("w", encoding="utf-8")
     stderr_file = stderr_path.open("w", encoding="utf-8")
 
-    process = type(
-        "Process",
-        (),
-        {
-            "poll": lambda self: None,
-            "terminate": lambda self: None,
-            "wait": lambda self, timeout=None: 0,
-            "kill": lambda self: None,
-        },
-    )()
+    process = _ActiveProcess()
     runner._processes["runtime-123"] = (process, stdout_file, stderr_file)
 
     runner.close_session("runtime-123")
@@ -89,14 +110,15 @@ def test_close_session_skips_missing_process(tmp_path: Path) -> None:
     runner.close_session("runtime-123")
 
 
-def test_build_script_uses_omx_exec(tmp_path: Path) -> None:
+def test_build_script_uses_codex_exec_with_full_permission(tmp_path: Path) -> None:
     runner = OmxRunner(run_dir=tmp_path / "runs")
     script = runner._build_script(repo_path=tmp_path / "repo", prompt_path=tmp_path / "prompt.txt")
 
-    assert "omx exec --dangerously-bypass-approvals-and-sandbox" in script
+    assert "codex exec --dangerously-bypass-approvals-and-sandbox" in script
+    assert "omx exec" not in script
 
 
-def test_build_resume_script_uses_omx_exec_resume(tmp_path: Path) -> None:
+def test_build_resume_script_uses_codex_exec_resume_with_full_permission(tmp_path: Path) -> None:
     runner = OmxRunner(run_dir=tmp_path / "runs")
     script = runner._build_resume_script(
         repo_path=tmp_path / "repo",
@@ -104,7 +126,8 @@ def test_build_resume_script_uses_omx_exec_resume(tmp_path: Path) -> None:
         omx_session_id="session-123",
     )
 
-    assert "omx exec resume session-123 --dangerously-bypass-approvals-and-sandbox" in script
+    assert "codex exec resume session-123 --dangerously-bypass-approvals-and-sandbox" in script
+    assert "omx exec" not in script
 
 
 def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollout_found(tmp_path: Path) -> None:
@@ -121,16 +144,7 @@ def test_wait_raises_rollout_missing_error_when_resume_stderr_mentions_no_rollou
     )
     stdout_file = stdout_path.open("w", encoding="utf-8")
     stderr_file = stderr_path.open("a", encoding="utf-8")
-    process = type(
-        "Process",
-        (),
-        {
-            "poll": lambda self: 1,
-            "terminate": lambda self: None,
-            "wait": lambda self, timeout=None: 1,
-            "kill": lambda self: None,
-        },
-    )()
+    process = _ExitedProcess()
     runner._processes[runtime_handle] = (process, stdout_file, stderr_file)
 
     try:

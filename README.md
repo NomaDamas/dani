@@ -1,15 +1,14 @@
 # dani
 
 Simple GitHub webhook -> agent automation loop. Supports two pluggable agent
-runtimes: **Oh-My-Codex (`omx`, default)** and **Oh-My-OpenAgents (`omo`,
-opt-in)**.
+runtimes: **Codex (`codex`, default)** and **Oh-My-OpenAgents (`omo`, opt-in)**.
 
 ## What v1 includes
 - Typer CLI
 - FastAPI webhook server
 - Registered repos only
 - Repo-serial / cross-repo parallel job handling
-- Pluggable agent runtime: non-interactive `omx exec` / `omx exec resume` (default)
+- Pluggable agent runtime: non-interactive `codex exec` / `codex exec resume` (default)
   or HTTP-backed Oh-My-OpenAgents (`opencode serve`)
 - Separate prompt templates in `dani/prompts.py`
 - Workflows for:
@@ -23,7 +22,7 @@ opt-in)**.
 ## Environment
 Required local tools (at least one depending on the selected runtime):
 - `git`
-- `omx` — required when `DANI_AGENT_RUNTIME=omx` (default)
+- `codex` — required for the default Codex runtime
 - `opencode` — required when `DANI_AGENT_RUNTIME=omo`
 
 Required environment variables:
@@ -32,7 +31,7 @@ Required environment variables:
 
 Optional environment variables:
 - `DANI_AGENT_RUNTIME` — selects the agent backend. Accepted values:
-  - `omx` / `oh-my-codex` / `codex` (default)
+  - `codex` / `oh-my-codex` (default)
   - `omo` / `oh-my-openagents` / `oh-my-openagent` / `opencode`
 - `DANI_AGENT_TIMEOUT_SECONDS` — overrides the per-job agent wait timeout in seconds.
 
@@ -48,11 +47,9 @@ Optional config file (`~/.dani/config.json` by default, or `<data-dir>/config.js
 `agent_timeout_seconds` defaults to `3600`. The environment variable
 `DANI_AGENT_TIMEOUT_SECONDS` takes precedence over the config file when set.
 
-When `DANI_AGENT_RUNTIME=omo` is selected, dani automatically prefixes every
-opencode prompt with the `ultrawork` keyword so oh-my-openagents' ultrawork
-loop mode is always active, and runtime-specific prompt substitutions swap
-codex-only shell commands (`$ralph`, `$code-review`) for their opencode
-equivalents (ultrawork mode and the Momus-Plan-Critic subagent respectively).
+Implementation prompts now instruct Codex to use `$omo:ulw-loop tdd manual qa
+commit well` for evidence-led delivery. Review prompts use plain Codex code
+review guidance instead of a separate review command.
 
 By default, `omo` drives opencode through its long-lived **HTTP server**
 (`opencode serve`) instead of one-shot `opencode run` subprocesses. Each
@@ -73,8 +70,8 @@ Optional `omo` runtime environment variables:
 - `OPENCODE_SERVER_PASSWORD` — forwarded to the spawned server and used
   for HTTP basic auth on every request when set.
 
-## Codex/OMX trust prerequisite
-Before dani can reliably launch or resume OMX/Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `omx exec 'hello'` or `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
+## Codex trust prerequisite
+Before dani can reliably launch or resume Codex sessions for a repository, that repository directory should be trusted by Codex at least once. In practice, run `codex exec 'hello'` once from the target repo and accept the trust prompt before using dani automation there. Otherwise a trust prompt can block session startup or resume.
 
 ## Oh-My-OpenAgents (opencode) prerequisite
 When running with `DANI_AGENT_RUNTIME=omo`, dani drives opencode through the
@@ -101,9 +98,9 @@ State is stored under `~/.dani/` by default:
 - `jobs.json`
 - `sessions.json`
 - `events.jsonl`
-- `runs/` for generated agent-runtime prompt/script artifacts (omx or omo)
+- `runs/` for generated agent-runtime prompt/script artifacts (codex or omo)
 
 
 ## GitHub surfaces
-- OMX sessions should use `gh` for issue comments, PR comments, and PR creation/update.
+- Codex sessions should use `gh` for issue comments, PR comments, and PR creation/update.
 - `dani/github.py` and `dani/github_helper.py` remain PyGithub-backed internal surfaces for dani runtime logic.

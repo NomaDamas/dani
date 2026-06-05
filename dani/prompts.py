@@ -10,9 +10,9 @@ from dani.signatures import build_signature
 # dani drives agents in a non-interactive webhook-triggered loop. There is no
 # human attached to the session: any tool that waits for human input (notably
 # opencode's `question` tool) will block the session forever, eventually
-# tripping `agent_timeout_seconds` and failing the job. omx (codex) does not
-# expose `question` today, but the guard is run-time-agnostic so future omx
-# tool surface changes can't reintroduce the same stall.
+# tripping `agent_timeout_seconds` and failing the job. Codex does not expose
+# `question` today, but the guard is run-time-agnostic so future tool surface
+# changes can't reintroduce the same stall.
 NON_INTERACTIVE_GUARD = (
     "NON-INTERACTIVE AUTOMATION CONTRACT (read first):\n"
     "- You are running inside dani's non-interactive automation loop. There is NO human attached to this session.\n"
@@ -124,7 +124,7 @@ $pr_context
 
 Implement the approved change.
 Requirements:
-- Use $$ralph to finish the work
+- Use $$omo:ulw-loop tdd manual qa commit well to finish the work
 - Write tests first (TDD)
 - Make all tests pass
 - Actually run the code and verify behavior
@@ -152,10 +152,11 @@ Recent discussion:
 $discussion
 
 $review_mode_note
-Use the code locally and run $$code-review before writing the review comment.
+Use the code locally before writing the review comment.
+Use Codex's normal code review judgment: prioritize bugs, behavioral regressions, and missing tests.
 Do real verification, not only static inspection.
 Checklist:
-- [ ] Use $$code-review
+- [ ] Review the diff with Codex's normal code review judgment
 - [ ] Run the code or tests needed to validate behavior
 - [ ] Include Real Result from actual verification
 - [ ] Include concrete evidence appropriate for what you verified
@@ -255,18 +256,10 @@ After the push succeeds, exit.
 }
 
 
-# omx uses codex shell-slash commands ($ralph, $code-review); omo (opencode)
-# has neither, so the equivalent intents are swapped in post-render: ralph loop
-# -> ultrawork mode (always-on for omo), $code-review -> Momus-Plan-Critic subagent.
-_RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {
-    "omo": (
-        ("$code-review", "the Momus-Plan-Critic subagent for rigorous verification"),
-        ("$ralph", "ultrawork"),
-    ),
-}
+_RUNTIME_SUBSTITUTIONS: dict[str, tuple[tuple[str, str], ...]] = {}
 
 
-def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "omx") -> str:
+def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "codex") -> str:
     template = TEMPLATES[template_name]
     context = dict(context)
     context.setdefault("review_cycle", "")
@@ -278,7 +271,7 @@ def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str =
             "signature": build_signature(stage=template_name, job_id=context.get("job_id", "unknown")),
         }
     rendered = template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
-    substitutions = _RUNTIME_SUBSTITUTIONS.get((runtime or "omx").strip().lower())
+    substitutions = _RUNTIME_SUBSTITUTIONS.get((runtime or "codex").strip().lower())
     if substitutions:
         for needle, replacement in substitutions:
             rendered = rendered.replace(needle, replacement)
