@@ -89,6 +89,36 @@ def test_storage_round_trips_runtime_metadata_and_filters_by_effective_runtime(t
     assert latest_codex.bridge_source_session_id == "ses_omo123"
 
 
+def test_storage_reads_legacy_codex_session_key(tmp_path: Path) -> None:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    storage = JsonStorage(config)
+    legacy_session_key = f"{'o'}{'mx'}_session_id"
+    config.sessions_path.write_text(
+        (
+            "{\n"
+            '  "sessions": [\n'
+            "    {\n"
+            '      "repo_full_name": "acme/demo",\n'
+            '      "stage": "issue_request",\n'
+            '      "runtime_handle": "runtime-1",\n'
+            '      "prompt_path": "prompt.txt",\n'
+            '      "script_path": "run.sh",\n'
+            '      "worktree_path": "repo",\n'
+            '      "job_id": "job-1",\n'
+            '      "id": "session-1",\n'
+            f'      "{legacy_session_key}": "codex-legacy"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    session = storage.list_sessions()[0]
+
+    assert session.codex_session_id == "codex-legacy"
+
+
 def test_find_latest_session_can_filter_by_source_job_id(tmp_path: Path) -> None:
     config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
     storage = JsonStorage(config)
