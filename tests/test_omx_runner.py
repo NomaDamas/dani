@@ -126,7 +126,7 @@ def test_build_resume_script_uses_codex_exec_resume_with_full_permission(tmp_pat
         omx_session_id="session-123",
     )
 
-    assert "codex exec resume session-123 --dangerously-bypass-approvals-and-sandbox" in script
+    assert "codex exec resume --dangerously-bypass-approvals-and-sandbox session-123" in script
     assert "omx exec" not in script
 
 

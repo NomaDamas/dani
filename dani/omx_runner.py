@@ -128,7 +128,7 @@ class OmxRunner:
             "#!/bin/sh\n"
             "set -eu\n"
             f"cd {quoted_repo}\n"
-            f'exec codex exec resume {quoted_session_id} --dangerously-bypass-approvals-and-sandbox "$(cat {quoted_prompt})"\n'
+            f'exec codex exec resume --dangerously-bypass-approvals-and-sandbox {quoted_session_id} "$(cat {quoted_prompt})"\n'
         )
 
     def wait(
