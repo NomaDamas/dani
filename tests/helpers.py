@@ -24,6 +24,20 @@ class FakeGitHubCLI:
         self.issue_labels: dict[tuple[str, int], list[str]] = {}
         self.users: dict[str, dict[str, Any]] = {}
         self.closed_pull_requests: list[tuple[str, int]] = []
+        self.org_members_by_casefolded_org: dict[str, set[str]] = {}
+        self.recorded_issue_comment_reactions: list[tuple[str, int, int, str]] = []
+        self.simulated_reaction_failure: Exception | None = None
+        self.deleted_issue_comment_ids: list[tuple[str, int]] = []
+        self._next_comment_id: int = 1
+        self._next_comment_created_at: int = 0
+
+    def _allocate_comment(self, body: str) -> dict[str, Any]:
+        comment_id = self._next_comment_id
+        self._next_comment_id += 1
+        created_seq = self._next_comment_created_at
+        self._next_comment_created_at += 1
+        created_at = f"2026-01-01T00:00:{created_seq:02d}Z"
+        return {"id": comment_id, "body": body, "created_at": created_at}
 
     def list_open_issues(self, repo_full_name: str) -> list[dict[str, Any]]:
         return list(self.open_issues.get(repo_full_name, []))
@@ -98,20 +112,31 @@ class FakeGitHubCLI:
             labels.append(label)
 
     def add_issue_signature(self, repo_full_name: str, issue_number: int, signature: str) -> None:
-        self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append({"body": signature})
+        self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append(self._allocate_comment(signature))
 
     def add_pr_signature(self, repo_full_name: str, pr_number: int, signature: str) -> None:
-        self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append({"body": signature})
+        self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append(self._allocate_comment(signature))
 
     def create_issue_comment(self, repo_full_name: str, issue_number: int, body: str) -> dict[str, Any]:
-        comment = {"body": body}
+        comment = self._allocate_comment(body)
         self.issue_comment_map.setdefault((repo_full_name, issue_number), []).append(comment)
         return comment
 
     def create_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> dict[str, Any]:
-        comment = {"body": body}
+        comment = self._allocate_comment(body)
         self.pr_comment_map.setdefault((repo_full_name, pr_number), []).append(comment)
         return comment
+
+    def delete_issue_comment(self, repo_full_name: str, comment_id: int) -> bool:
+        for (key_repo, _issue_number), comments in self.issue_comment_map.items():
+            if key_repo != repo_full_name:
+                continue
+            for index, comment in enumerate(comments):
+                if comment.get("id") == comment_id:
+                    del comments[index]
+                    self.deleted_issue_comment_ids.append((repo_full_name, comment_id))
+                    return True
+        return False
 
     def add_pull_request(
         self,
@@ -142,6 +167,24 @@ class FakeGitHubCLI:
             if pr.get("number") == pr_number:
                 pr["state"] = "closed"
                 return
+
+    def register_org_member(self, org: str, username: str) -> None:
+        self.org_members_by_casefolded_org.setdefault(org.casefold(), set()).add(username.casefold())
+
+    def is_org_member(self, org: str, username: str) -> bool:
+        if not org or not username:
+            return False
+        members = self.org_members_by_casefolded_org.get(org.casefold())
+        if not members:
+            return False
+        return username.casefold() in members
+
+    def add_issue_comment_reaction(
+        self, repo_full_name: str, issue_number: int, comment_id: int, reaction: str
+    ) -> None:
+        if self.simulated_reaction_failure is not None:
+            raise self.simulated_reaction_failure
+        self.recorded_issue_comment_reactions.append((repo_full_name, issue_number, comment_id, reaction))
 
 
 class LaunchRecord(TypedDict):

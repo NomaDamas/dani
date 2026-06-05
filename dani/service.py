@@ -29,7 +29,7 @@ from dani.models import (
     effective_session_runtime,
     utc_now,
 )
-from dani.prompts import render_prompt
+from dani.prompts import NON_INTERACTIVE_GUARD, ensure_non_interactive_guard, render_prompt, split_non_interactive_guard
 from dani.queue import RepoQueueManager
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature, is_opt_out_comment, parse_signature
@@ -86,7 +86,13 @@ class DaniService:
         self._rehydrate_pending_jobs()
 
     def _rehydrate_pending_jobs(self) -> None:
-        """Submit durable pending jobs that survived a Dani process restart."""
+        """Submit durable pending jobs that survived a Dani process restart.
+
+        Also reconciles orphan sessions: any session.status == "launched" whose
+        linked job is terminal (or whose linked job we are about to re-queue)
+        is transitioned out of "launched" so it never reappears as drift in
+        future doctor / monitoring runs.
+        """
         for job in self.storage.list_jobs():
             if job.status in {"queued", "retrying"}:
                 self.queue_manager.submit(job)
@@ -109,6 +115,9 @@ class DaniService:
                                 "note": "side_effect_already_posted",
                             },
                         )
+                        self._reconcile_orphan_session(
+                            job.session_id, new_status="completed", reason="recovered_after_restart"
+                        )
                         continue
                 recovered = self.storage.update_job(
                     job.id,
@@ -120,7 +129,63 @@ class DaniService:
                         "recovered_at": utc_now(),
                     },
                 )
+                self._reconcile_orphan_session(job.session_id, new_status="failed", reason="superseded_by_rehydration")
                 self.queue_manager.submit(recovered)
+
+        self._reconcile_drift_sessions_on_startup()
+
+    def _reconcile_orphan_session(self, session_id: str | None, *, new_status: str, reason: str) -> None:
+        """Transition a single session out of 'launched' state.
+
+        Safe to call with a missing or None session_id (no-op). Used by
+        startup rehydration and by job-level supersede paths so the
+        session record never lingers as 'launched' once its owning job
+        has reached a terminal state.
+        """
+
+        if not session_id:
+            return
+        try:
+            self.storage.update_session(
+                session_id,
+                status=new_status,
+                ended_at=utc_now(),
+                termination_reason=reason,
+            )
+        except KeyError:
+            return
+
+    def _reconcile_drift_sessions_on_startup(self) -> None:
+        """Catch any remaining session.launched whose job is already terminal.
+
+        A previous Dani process can crash *between* updating the session row
+        and updating the job row. This sweep, run once at startup, closes
+        that small window by detecting drift (session.status == 'launched'
+        AND linked job.status in {completed, failed, superseded}) and
+        transitioning the session to match the job's terminal outcome.
+        """
+
+        try:
+            sessions = self.storage.list_sessions()
+            jobs = self.storage.list_jobs()
+        except Exception:
+            return
+        job_by_id = {j.id: j for j in jobs}
+        terminal = {"completed", "failed", "superseded"}
+        job_to_session_status = {"completed": "completed", "failed": "failed", "superseded": "failed"}
+        for session in sessions:
+            if session.status != "launched":
+                continue
+            job = job_by_id.get(session.job_id) if session.job_id else None
+            if job is None:
+                continue
+            if job.status not in terminal:
+                continue
+            self._reconcile_orphan_session(
+                session.id,
+                new_status=job_to_session_status[job.status],
+                reason=f"startup_drift_reconciled_from_{job.status}",
+            )
 
     def register_repo(
         self, full_name: str, local_path: str, main_branch: str = "main", dev_branch: str = "dev"
@@ -166,6 +231,7 @@ class DaniService:
 
         for job in self.storage.find_jobs(repo_full_name=repo_full_name, issue_number=issue_number):
             self.storage.update_job(job.id, status="superseded")
+            self._reconcile_orphan_session(job.session_id, new_status="failed", reason="superseded_by_restart_issue")
 
         issue_metadata = self._issue_metadata(repo_full_name, issue_number)
         return self._enqueue_job(
@@ -207,19 +273,113 @@ class DaniService:
         if event.kind == "branch_push":
             return self._queue_dev_sync(repo, event)
 
+        if event.kind == "pull_request_closed":
+            return self._handle_pull_request_closed(repo, event)
+
         if event.kind == "issue_opened":
-            return self._queue_issue_request(repo, event)
+            return self._dispatch_issue_opened(repo, event)
 
         if event.kind == "issue_comment" and self._is_approve_comment(event.body):
-            return self._queue_implementation(repo, event)
+            return self._dispatch_approve_comment(repo, event)
 
         if event.kind == "issue_comment":
-            return self._queue_issue_followup(repo, event)
+            return self._dispatch_issue_followup_comment(repo, event)
 
         if event.kind == "pull_request_opened":
-            return self._queue_pull_request_review(repo, event, signature)
+            return self._dispatch_pull_request_opened(repo, event, signature)
 
         return {"status": "ignored", "reason": "unsupported_event"}
+
+    def _dispatch_issue_opened(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.action == "reopened":
+            return {"status": "ignored", "reason": "issue_reopened_no_op"}
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        return self._queue_issue_request(repo, event)
+
+    def _dispatch_approve_comment(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        if not self._is_authorized_approver(repo, event):
+            self._react_unauthorized_approve(repo, event)
+            return {"status": "ignored", "reason": "approver_not_authorized"}
+        if self._has_existing_implementation_job(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "duplicate_implementation"}
+        return self._queue_implementation(repo, event)
+
+    _TRUSTED_APPROVE_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER"})
+
+    def _is_authorized_approver(self, repo: RepoConfig, event: NormalizedEvent) -> bool:
+        owner_login = repo.full_name.split("/", 1)[0]
+        actor = event.actor_login or ""
+        if not actor:
+            return False
+        if actor.casefold() == owner_login.casefold():
+            return True
+        comment = event.payload.get("comment") if isinstance(event.payload, dict) else None
+        author_association = ""
+        if isinstance(comment, dict):
+            author_association = str(comment.get("author_association") or "").upper()
+        if author_association in self._TRUSTED_APPROVE_AUTHOR_ASSOCIATIONS:
+            return True
+        try:
+            return bool(self.github.is_org_member(owner_login, actor))
+        except Exception:
+            logger.warning(
+                "approve_owner_check_failed",
+                extra={
+                    "repo_full_name": repo.full_name,
+                    "owner_login": owner_login,
+                    "actor_login": actor,
+                },
+                exc_info=True,
+            )
+            return False
+
+    def _react_unauthorized_approve(self, repo: RepoConfig, event: NormalizedEvent) -> None:
+        comment = event.payload.get("comment") if isinstance(event.payload, dict) else None
+        comment_id = comment.get("id") if isinstance(comment, dict) else None
+        if not isinstance(comment_id, int):
+            return
+        try:
+            self.github.add_issue_comment_reaction(repo.full_name, event.number, comment_id, "-1")
+        except Exception:
+            logger.warning(
+                "approve_unauthorized_reaction_failed",
+                extra={
+                    "repo_full_name": repo.full_name,
+                    "issue_number": event.number,
+                    "actor_login": event.actor_login,
+                    "comment_id": comment_id,
+                },
+                exc_info=True,
+            )
+
+    def _dispatch_issue_followup_comment(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        if event.issue_state == "closed":
+            return {"status": "ignored", "reason": "issue_closed"}
+        if self.storage.is_terminal_issue(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "issue_terminal"}
+        if self._is_dani_self_authored(event):
+            return {"status": "ignored", "reason": "self_authored_comment"}
+        if self._completed_followup_count(repo.full_name, event.number) >= self.config.max_issue_followups:
+            return {"status": "ignored", "reason": "max_followups_reached"}
+        return self._queue_issue_followup(repo, event)
+
+    def _dispatch_pull_request_opened(
+        self, repo: RepoConfig, event: NormalizedEvent, signature: dict[str, str] | None
+    ) -> dict[str, Any]:
+        if event.pr_merged is True:
+            return {"status": "ignored", "reason": "pr_merged"}
+        if event.pr_state == "closed":
+            return {"status": "ignored", "reason": "pr_not_open"}
+        if self.storage.is_terminal_pr(repo.full_name, event.number):
+            return {"status": "ignored", "reason": "pr_terminal"}
+        return self._queue_pull_request_review(repo, event, signature)
 
     def _handle_agent_event(self, event: NormalizedEvent, signature: dict[str, str]) -> dict[str, Any]:
         stage = signature.get("stage")
@@ -1327,14 +1487,16 @@ class DaniService:
         return self._apply_bridge_context(prompt, bridge_prompt)
 
     def _apply_bridge_context(self, prompt: str, bridge_prompt: str) -> str:
+        guarded_prompt = ensure_non_interactive_guard(prompt)
         if not bridge_prompt.strip():
-            return prompt
-        return (
+            return guarded_prompt
+        bridge_block = (
             f"{bridge_prompt}\n\n"
             "Use the imported OMO context above only as bounded background context. "
-            "This is not a native resume; continue from it conservatively.\n\n"
-            f"{prompt}"
+            "This is not a native resume; continue from it conservatively."
         )
+        prompt_body = split_non_interactive_guard(guarded_prompt)
+        return f"{NON_INTERACTIVE_GUARD}\n{bridge_block}\n\n{prompt_body}"
 
     def _verify_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         if job.stage == "issue_request":
@@ -1483,7 +1645,7 @@ class DaniService:
         expected_signature = str(job.metadata.get("expected_signature", ""))
         original_error = str(job.metadata.get("original_error", ""))
         comment_body = str(job.metadata.get("comment_body", ""))
-        return (
+        prompt = (
             f"You are operating inside repository: {repo.full_name}\n"
             f"Local path: {repo.local_path}\n"
             f"Recovery task for GitHub issue #{issue_number}: {issue_title}\n\n"
@@ -1503,10 +1665,22 @@ class DaniService:
             f"Original job id: {source_job_id}\n"
             f"Original stage: {original_stage}\n"
             f"Required exact Dani signature:\n{expected_signature}\n\n"
+            "POST EXACTLY ONCE. Strict anti-duplicate contract:\n"
+            "- Before calling `gh issue comment`, run:\n"
+            f"  gh issue view {issue_number} --repo {repo.full_name} --json comments --jq '.comments[].body' "
+            f"| grep -F '{expected_signature}' || true\n"
+            "  If that command prints anything non-empty, the recovery comment already exists. DO NOT post again. "
+            "Exit immediately.\n"
+            "- Call `gh issue comment` at most ONE time in this session.\n"
+            "- After `gh issue comment` returns successfully, do not run it again — not for retries, not for "
+            "self-review, not for 'double-checking'. Exit.\n"
+            "- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. "
+            "If the signature is already present, the post succeeded; do not retry; exit.\n\n"
             "Post it with gh (write the comment to a file first, then send it):\n"
             f"gh issue comment {issue_number} --repo {repo.full_name} --body-file <recovery-comment.md>\n\n"
             "After posting the comment, exit."
         )
+        return ensure_non_interactive_guard(prompt)
 
     def _build_review_round_prompt(
         self,
@@ -1609,21 +1783,36 @@ class DaniService:
 
     def _verify_issue_request_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = build_signature(stage="issue_request", job=job.id, issue=int(job.issue_number or 0))
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            raise RuntimeError("issue-request-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error="issue-request-comment-missing",
+            job=job,
+        )
 
     def _verify_issue_followup_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = build_signature(stage="issue_followup", job=job.id, issue=int(job.issue_number or 0))
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            raise RuntimeError("issue-followup-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error="issue-followup-comment-missing",
+            job=job,
+        )
 
     def _verify_issue_comment_recovery_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature = str(job.metadata.get("expected_signature") or "")
         if not signature:
             raise RuntimeError("issue-comment-recovery-missing-signature")
-        if not self._has_exact_issue_signature(repo.full_name, int(job.issue_number or 0), signature):
-            original_error = str(job.metadata.get("original_error") or "issue-comment-missing")
-            raise RuntimeError(original_error)
+        original_error = str(job.metadata.get("original_error") or "issue-comment-missing")
+        self._ensure_single_issue_signature_comment(
+            repo.full_name,
+            int(job.issue_number or 0),
+            signature,
+            missing_error=original_error,
+            job=job,
+        )
 
     def _verify_implementation_side_effect(self, repo: RepoConfig, job: JobRecord) -> None:
         signature_fields: dict[str, int | str] = {
@@ -1711,6 +1900,70 @@ class DaniService:
             )
         )
 
+    def _ensure_single_issue_signature_comment(
+        self,
+        repo_full_name: str,
+        issue_number: int,
+        signature: str,
+        *,
+        missing_error: str,
+        job: JobRecord | None = None,
+    ) -> None:
+        comments = self.github.find_comments_by_signature(
+            repo_full_name, issue_number, kind="issue", signature_fragment=signature
+        )
+        if not comments:
+            raise RuntimeError(missing_error)
+        if len(comments) <= 1:
+            return
+        ordered = sorted(comments, key=lambda comment: str(comment.get("created_at") or ""))
+        keeper = ordered[0]
+        duplicates = ordered[1:]
+        deleted_ids: list[int] = []
+        failed_ids: list[int] = []
+        for duplicate in duplicates:
+            comment_id = duplicate.get("id")
+            if not isinstance(comment_id, int):
+                continue
+            try:
+                if self.github.delete_issue_comment(repo_full_name, comment_id):
+                    deleted_ids.append(comment_id)
+            except Exception:
+                failed_ids.append(comment_id)
+                logger.warning(
+                    "duplicate_signature_comment_delete_failed",
+                    extra={
+                        "repo_full_name": repo_full_name,
+                        "issue_number": issue_number,
+                        "comment_id": comment_id,
+                        "signature": signature,
+                    },
+                    exc_info=True,
+                )
+        logger.warning(
+            "duplicate_signature_comments_pruned",
+            extra={
+                "repo_full_name": repo_full_name,
+                "issue_number": issue_number,
+                "signature": signature,
+                "kept_comment_id": keeper.get("id"),
+                "duplicate_count": len(duplicates),
+                "deleted_comment_ids": deleted_ids,
+                "failed_comment_ids": failed_ids,
+                "job_id": job.id if job is not None else None,
+            },
+        )
+        if job is not None:
+            note = {
+                "duplicate_count": len(duplicates),
+                "deleted_comment_ids": deleted_ids,
+                "failed_comment_ids": failed_ids,
+                "kept_comment_id": keeper.get("id"),
+            }
+            history = list(job.metadata.get("duplicate_signature_prunes") or [])
+            history.append(note)
+            job.metadata["duplicate_signature_prunes"] = history
+
     def _is_approve_comment(self, body: str | None) -> bool:
         return bool(body and "/approve" in body.lower())
 
@@ -1760,6 +2013,38 @@ class DaniService:
             if job.status in {"queued", "launched", "completed"}:
                 return True
         return False
+
+    def _has_existing_implementation_job(self, repo_full_name: str, issue_number: int) -> bool:
+        for job in self.storage.find_jobs(
+            repo_full_name=repo_full_name, stage="implementation", issue_number=issue_number
+        ):
+            if job.status in {"queued", "launched", "running", "completed"}:
+                return True
+        return False
+
+    def _completed_followup_count(self, repo_full_name: str, issue_number: int) -> int:
+        count = 0
+        for job in self.storage.find_jobs(
+            repo_full_name=repo_full_name, stage="issue_followup", issue_number=issue_number
+        ):
+            if job.status in {"queued", "launched", "running", "completed"}:
+                count += 1
+        return count
+
+    def _is_dani_self_authored(self, event: NormalizedEvent) -> bool:
+        configured_login = self.config.bot_login
+        if configured_login:
+            return event.actor_login == configured_login
+        return event.actor_type == "Bot"
+
+    def _handle_pull_request_closed(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
+        merged = bool(event.pr_merged)
+        self.storage.mark_terminal_pr(repo.full_name, event.number, merged=merged)
+        if merged:
+            issue_number = self._extract_issue_number(event.body)
+            if issue_number is not None:
+                self.storage.mark_terminal_issue(repo.full_name, issue_number)
+        return {"status": "marked_terminal", "pr_number": event.number, "merged": merged}
 
     def _queue_implementation(self, repo: RepoConfig, event: NormalizedEvent) -> dict[str, Any]:
         job = self._enqueue_job(
@@ -1857,9 +2142,9 @@ class DaniService:
             )
             return {"status": "queued", "job_id": job.id, "stage": job.stage}
 
-        if issue_number is None:
-            return {"status": "ignored", "reason": "untracked_pr"}
-        return self._queue_external_pull_request_review(repo, event, issue_number=issue_number)
+        return self._queue_external_pull_request_review(
+            repo, event, issue_number=issue_number, untracked=issue_number is None
+        )
 
     def _external_pull_request_guard(
         self, repo: RepoConfig, event: NormalizedEvent, *, is_agent_managed_pr: bool
@@ -1892,29 +2177,35 @@ class DaniService:
         repo: RepoConfig,
         event: NormalizedEvent,
         *,
-        issue_number: int,
+        issue_number: int | None,
+        untracked: bool = False,
     ) -> dict[str, Any]:
         event_key = self._external_pull_request_event_key(event)
         if not self.storage.record_processed_event(event_key):
             return {"status": "ignored", "reason": "duplicate_external_pr_event"}
 
         consumed_review_rounds = self._consumed_external_review_rounds(event.repo_full_name, event.number)
+        review_round_cap = 1 if untracked else self.config.review_rounds
 
-        if len(consumed_review_rounds) >= self.config.review_rounds:
-            return {"status": "ignored", "reason": "external_review_rounds_exhausted"}
+        if len(consumed_review_rounds) >= review_round_cap:
+            reason = "untracked_external_review_round_consumed" if untracked else "external_review_rounds_exhausted"
+            return {"status": "ignored", "reason": reason}
 
         next_review_round = max(consumed_review_rounds, default=0) + 1
+        metadata: dict[str, Any] = {
+            "title": event.title or "",
+            "body": event.body or "",
+            **self._external_pr_metadata(event),
+        }
+        if untracked:
+            metadata["untracked"] = True
         job = self._enqueue_job(
             repo,
             stage="review_round",
             issue_number=issue_number,
             pr_number=event.number,
             review_round=next_review_round,
-            metadata={
-                "title": event.title or "",
-                "body": event.body or "",
-                **self._external_pr_metadata(event),
-            },
+            metadata=metadata,
         )
         return {"status": "queued", "job_id": job.id, "stage": job.stage}
 

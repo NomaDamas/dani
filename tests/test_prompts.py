@@ -1,6 +1,6 @@
 import pytest
 
-from dani.prompts import render_prompt
+from dani.prompts import NON_INTERACTIVE_GUARD, TEMPLATES, render_prompt, split_non_interactive_guard
 
 REMOVED_IMPLEMENTATION_COMMAND = f"${'ra'}{'lph'}"
 REMOVED_REVIEW_COMMAND = f"${'code'}-{'review'}"
@@ -137,6 +137,48 @@ def test_issue_request_prompt_uses_gh_instructions() -> None:
 
     assert "gh issue comment 7 --repo acme/demo --body-file <comment-file.md>" in prompt
     assert "PyGithub helper" not in prompt
+
+
+def test_issue_request_prompt_enforces_anti_duplicate_pre_check() -> None:
+    signature = "<!-- dani:stage=issue_request;job=abc;issue=7 -->"
+    prompt = render_prompt(
+        "issue_request",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "discussion": "",
+            "signature": signature,
+        },
+    )
+
+    assert "POST EXACTLY ONCE" in prompt
+    assert "gh issue view 7 --repo acme/demo --json comments" in prompt
+    assert f"grep -F '{signature}'" in prompt
+    assert "at most ONE time" in prompt
+
+
+def test_issue_followup_prompt_enforces_anti_duplicate_pre_check() -> None:
+    signature = "<!-- dani:stage=issue_followup;job=xyz;issue=7 -->"
+    prompt = render_prompt(
+        "issue_followup",
+        {
+            "repo": "acme/demo",
+            "local_path": "workspace/demo",
+            "issue_number": 7,
+            "issue_title": "Need a bot",
+            "issue_body": "Implement it",
+            "comment_body": "any chance you can build it?",
+            "signature": signature,
+        },
+    )
+
+    assert "POST EXACTLY ONCE" in prompt
+    assert "gh issue view 7 --repo acme/demo --json comments" in prompt
+    assert f"grep -F '{signature}'" in prompt
+    assert "at most ONE time" in prompt
 
 
 def test_issue_request_prompt_requires_ai_summary_and_expected_outcome() -> None:
@@ -292,10 +334,11 @@ def test_issue_request_prompt_forbids_self_handoff_promises() -> None:
     assert "does not inherit your reasoning trace" in prompt
 
 
-def test_issue_request_prompt_checklist_mentions_approve_gate_and_open_questions() -> None:
+def test_issue_request_prompt_checklist_mentions_approve_gate_and_async_decisions() -> None:
     prompt = render_prompt("issue_request", _issue_request_context())
 
-    assert "Open questions for the human" in prompt
+    assert "Assumptions / human decisions to resolve asynchronously before /approve" in prompt
+    assert "Open questions for the human" not in prompt
     assert 'implementation starts only after a human comment containing "/approve"' in prompt
 
 
@@ -304,6 +347,13 @@ def test_issue_followup_prompt_declares_planning_only_role() -> None:
 
     assert "PLANNING AGENT" in prompt
     assert "DO NOT write code" in prompt
+
+
+def test_issue_followup_prompt_mentions_async_decisions_not_open_questions() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context())
+
+    assert 'assumptions / human decisions to resolve asynchronously before "/approve"' in prompt
+    assert "remaining open questions" not in prompt
     assert "/approve" in prompt
     assert "NEW, SEPARATE agent session" in prompt
 
@@ -542,25 +592,37 @@ def _dev_sync_conflict_context() -> dict[str, object]:
     }
 
 
-_NON_INTERACTIVE_TEMPLATES: tuple[tuple[str, dict[str, object]], ...] = (
-    ("issue_request", _issue_request_context()),
-    ("issue_followup", _issue_followup_context()),
-    ("implementation", _implementation_context()),
-    ("review_round", _review_round_context()),
-    ("merge_conflict_resolution", _merge_conflict_resolution_context()),
-    ("final_verdict", _final_verdict_context()),
-    ("dev_sync_conflict", _dev_sync_conflict_context()),
-)
+_NON_INTERACTIVE_TEMPLATE_CONTEXTS: dict[str, dict[str, object]] = {
+    "issue_request": _issue_request_context(),
+    "issue_followup": _issue_followup_context(),
+    "implementation": _implementation_context(),
+    "review_round": _review_round_context(),
+    "merge_conflict_resolution": _merge_conflict_resolution_context(),
+    "final_verdict": _final_verdict_context(),
+    "dev_sync_conflict": _dev_sync_conflict_context(),
+}
 
 
-@pytest.mark.parametrize("template_name,context", _NON_INTERACTIVE_TEMPLATES)
+def test_split_non_interactive_guard_returns_body_without_raw_string_slicing() -> None:
+    prompt = f"{NON_INTERACTIVE_GUARD}\nPrompt body"
+
+    body = split_non_interactive_guard(prompt)
+
+    assert body == "Prompt body"
+
+
+def test_split_non_interactive_guard_accepts_unguarded_prompt() -> None:
+    assert split_non_interactive_guard("Prompt body") == "Prompt body"
+
+
+@pytest.mark.parametrize("template_name", sorted(TEMPLATES))
 @pytest.mark.parametrize("runtime", ["codex", "omo"])
 def test_every_template_prepends_non_interactive_guard(
     template_name: str,
-    context: dict[str, object],
     runtime: str,
 ) -> None:
-    prompt = render_prompt(template_name, context, runtime=runtime)
+    assert set(_NON_INTERACTIVE_TEMPLATE_CONTEXTS) == set(TEMPLATES)
+    prompt = render_prompt(template_name, _NON_INTERACTIVE_TEMPLATE_CONTEXTS[template_name], runtime=runtime)
 
     assert prompt.startswith("NON-INTERACTIVE AUTOMATION CONTRACT"), (
         f"{template_name}/{runtime}: guard must be the first thing the agent reads"

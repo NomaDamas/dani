@@ -21,6 +21,7 @@ from dani.opencode_http import (
     OpencodeServerManager,
     OpencodeSessionInfo,
 )
+from dani.prompts import NON_INTERACTIVE_GUARD
 
 
 class FakeOpencodeClient:
@@ -213,6 +214,17 @@ def test_launch_implementation_stage_prepends_ultrawork_prefix(runner_factory, t
     assert session.codex_session_id == client.created_sessions[0]["id"]
     assert consumer.registered == [session.codex_session_id]
     assert Path(session.prompt_path).read_text(encoding="utf-8") == "ultrawork\n\nImplement Issue #1."
+
+
+def test_launch_implementation_places_ultrawork_before_guard_as_control_prefix(runner_factory, tmp_path: Path) -> None:
+    runner, client, _ = runner_factory()
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=1)
+
+    runner.launch(tmp_path, job, f"{NON_INTERACTIVE_GUARD}\nImplement Issue #1.")
+
+    prompt_text = client.prompt_calls[0]["prompt_text"]
+    assert prompt_text.startswith("ultrawork\n\n" + NON_INTERACTIVE_GUARD)
+    assert prompt_text.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
 
 
 def test_launch_issue_request_stage_skips_ultrawork_prefix(runner_factory, tmp_path: Path) -> None:

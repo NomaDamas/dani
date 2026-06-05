@@ -110,6 +110,13 @@ class NormalizedEvent:
     ref: str | None = None
     commit_sha: str | None = None
     is_pull_request: bool = False
+    issue_state: str | None = None
+    pr_state: str | None = None
+    pr_merged: bool | None = None
+    actor_type: str | None = None
+
+
+DEFAULT_MAX_ISSUE_FOLLOWUPS = 3
 
 
 @dataclass(slots=True)
@@ -121,6 +128,8 @@ class DaniConfig:
     review_rounds: int = 3
     agent_runtime: str = "codex"
     agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
+    bot_login: str | None = None
+    max_issue_followups: int = DEFAULT_MAX_ISSUE_FOLLOWUPS
 
     @property
     def config_path(self) -> Path:
@@ -145,6 +154,10 @@ class DaniConfig:
     @property
     def processed_events_path(self) -> Path:
         return self.data_dir / "processed-events.json"
+
+    @property
+    def terminal_targets_path(self) -> Path:
+        return self.data_dir / "terminal-targets.json"
 
     @property
     def run_dir(self) -> Path:

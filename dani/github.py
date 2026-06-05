@@ -121,6 +121,32 @@ class GitHubCLI:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         return pull_request.create_issue_comment(body).raw_data
 
+    def delete_issue_comment(self, repo_full_name: str, comment_id: int) -> bool:
+        """Delete a single issue/PR comment by id.
+
+        Returns True on successful deletion, False if the comment no longer exists.
+        Other GithubException values propagate so callers can decide whether to
+        treat the failure as fatal.
+        """
+        repo = self._repo(repo_full_name)
+        try:
+            comment = repo.get_issue_comment(comment_id)
+        except UnknownObjectException:
+            return False
+        except GithubException as exc:
+            if exc.status == 404:
+                return False
+            raise
+        try:
+            comment.delete()
+        except UnknownObjectException:
+            return False
+        except GithubException as exc:
+            if exc.status == 404:
+                return False
+            raise
+        return True
+
     def close_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)
         pull_request.edit(state="closed")
@@ -157,6 +183,27 @@ class GitHubCLI:
             pull_request.edit(title=title, body=body, base=base)
             return pull_request.raw_data
         return repo.create_pull(title=title, body=body, base=base, head=head).raw_data
+
+    def is_org_member(self, org: str, username: str) -> bool:
+        if not org or not username:
+            return False
+        client = self._client_for_request()
+        try:
+            organization = client.get_organization(org)
+            user = client.get_user(username)
+        except UnknownObjectException:
+            return False
+        try:
+            return bool(organization.has_in_members(user))
+        except UnknownObjectException:
+            return False
+
+    def add_issue_comment_reaction(
+        self, repo_full_name: str, issue_number: int, comment_id: int, reaction: str
+    ) -> None:
+        issue = self._repo(repo_full_name).get_issue(issue_number)
+        comment = issue.get_comment(comment_id)
+        comment.create_reaction(reaction)
 
     def merge_pull_request(self, repo_full_name: str, pr_number: int) -> None:
         pull_request = self._repo(repo_full_name).get_pull(pr_number)

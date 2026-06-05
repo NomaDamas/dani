@@ -9,6 +9,7 @@ from dani.codex_runner import CodexRunner
 from dani.errors import ClaudeUsageLimitError, RolloutMissingError
 from dani.github import GitHubCLI
 from dani.models import RUNTIME_CODEX, RUNTIME_OMO, DaniConfig, JobRecord, NormalizedEvent, SessionRecord
+from dani.prompts import NON_INTERACTIVE_GUARD
 from dani.service import DaniService
 from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
@@ -416,6 +417,43 @@ def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_
     assert "$omo:ulw-loop tdd manual qa commit well" in omo_prompt
 
 
+def test_service_bridge_context_keeps_non_interactive_guard_first(tmp_path: Path) -> None:
+    service, _, _, _ = make_omo_preferred_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
+
+    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO, bridge_prompt="IMPORTED OMO CONTEXT")
+
+    assert prompt.startswith(NON_INTERACTIVE_GUARD)
+    assert prompt.index("IMPORTED OMO CONTEXT") > prompt.index("DO NOT call the `question` tool")
+    assert prompt.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
+
+
+@pytest.mark.parametrize("stage", ["issue_request_recovery", "issue_followup_recovery"])
+def test_issue_comment_recovery_prompt_includes_non_interactive_guard_first(tmp_path: Path, stage: str) -> None:
+    service, _, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(
+        repo_full_name="acme/demo",
+        stage=stage,
+        issue_number=41,
+        metadata={
+            "source_job_id": "source-job",
+            "expected_signature": "<!-- dani:stage=issue_request;job=source-job;issue=41 -->",
+            "original_error": "missing comment",
+        },
+    )
+
+    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+
+    assert prompt.startswith(NON_INTERACTIVE_GUARD)
+    assert "DO NOT call the `question` tool" in prompt
+    assert "Recovery task for GitHub issue #41" in prompt
+    assert prompt.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
+
+
 def test_issue_followup_verification_requires_exact_signature(tmp_path: Path) -> None:
     service, github, _ = make_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
@@ -550,6 +588,87 @@ def test_issue_followup_verification_rejects_stale_signature(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="issue-followup-comment-missing"):
         service._verify_side_effect(repo, job)
+
+
+def test_issue_followup_verification_prunes_duplicate_signatures(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=267)
+    signature = build_signature(stage="issue_followup", job=job.id, issue=267)
+    for _ in range(5):
+        github.add_issue_signature("acme/demo", 267, signature)
+    initial_comments = github.issue_comments("acme/demo", 267)
+    assert len(initial_comments) == 5
+    earliest_id = initial_comments[0]["id"]
+    duplicate_ids = [comment["id"] for comment in initial_comments[1:]]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 267)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
+    assert sorted(comment_id for _repo, comment_id in github.deleted_issue_comment_ids) == sorted(duplicate_ids)
+    prunes = job.metadata.get("duplicate_signature_prunes")
+    assert prunes and prunes[-1]["duplicate_count"] == 4
+    assert prunes[-1]["kept_comment_id"] == earliest_id
+
+
+def test_issue_request_verification_prunes_duplicate_signatures(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_request", issue_number=42)
+    signature = build_signature(stage="issue_request", job=job.id, issue=42)
+    for _ in range(3):
+        github.add_issue_signature("acme/demo", 42, signature)
+    earliest_id = github.issue_comments("acme/demo", 42)[0]["id"]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 42)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
+
+
+def test_issue_followup_verification_keeps_single_signature_untouched(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = JobRecord(repo_full_name=repo.full_name, stage="issue_followup", issue_number=99)
+    signature = build_signature(stage="issue_followup", job=job.id, issue=99)
+    github.add_issue_signature("acme/demo", 99, signature)
+
+    service._verify_side_effect(repo, job)
+
+    assert len(github.issue_comments("acme/demo", 99)) == 1
+    assert github.deleted_issue_comment_ids == []
+    assert "duplicate_signature_prunes" not in job.metadata
+
+
+def test_issue_comment_recovery_verification_prunes_duplicate_recovery_comments(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    expected_signature = build_signature(stage="issue_followup", job="source-job-id", issue=55)
+    job = JobRecord(
+        repo_full_name=repo.full_name,
+        stage="issue_followup_recovery",
+        issue_number=55,
+        metadata={
+            "expected_signature": expected_signature,
+            "original_error": "issue-followup-comment-missing",
+        },
+    )
+    for _ in range(4):
+        github.add_issue_signature("acme/demo", 55, expected_signature)
+    earliest_id = github.issue_comments("acme/demo", 55)[0]["id"]
+
+    service._verify_side_effect(repo, job)
+
+    remaining = github.issue_comments("acme/demo", 55)
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == earliest_id
 
 
 def test_issue_followup_rollout_missing_marks_job_failed_and_posts_restart_warning(tmp_path: Path) -> None:
@@ -773,6 +892,120 @@ def test_restart_issue_supersedes_existing_jobs_and_enqueues_new_issue_request(t
     assert "Earlier dani reply" in prompt
 
 
+def test_restart_issue_transitions_orphan_session_to_failed(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.queue_manager.submit = lambda job: None  # type: ignore[assignment]
+    stale_job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=77,
+        status="completed",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(stale_job)
+    orphan_session = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-orphan",
+        prompt_path=str(tmp_path / "prompt.txt"),
+        script_path=str(tmp_path / "run.sh"),
+        worktree_path=str(tmp_path),
+        job_id=stale_job.id,
+        issue_number=77,
+        status="launched",
+    )
+    service.storage.create_session(orphan_session)
+    service.storage.update_job(stale_job.id, session_id=orphan_session.id)
+
+    service.restart_issue("acme/demo", 77)
+
+    refreshed = next(s for s in service.storage.list_sessions() if s.id == orphan_session.id)
+    assert refreshed.status == "failed"
+    assert refreshed.termination_reason == "superseded_by_restart_issue"
+    assert refreshed.ended_at is not None
+
+
+def test_rehydrate_requeues_launched_job_and_transitions_orphan_session(tmp_path: Path) -> None:
+    service, github, _ = make_service(tmp_path)
+    job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=88,
+        status="launched",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(job)
+    orphan = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-orphan",
+        prompt_path=str(tmp_path / "p.txt"),
+        script_path=str(tmp_path / "r.sh"),
+        worktree_path=str(tmp_path),
+        job_id=job.id,
+        issue_number=88,
+        status="launched",
+    )
+    service.storage.create_session(orphan)
+    service.storage.update_job(job.id, session_id=orphan.id)
+
+    rebuilt = DaniService(
+        service.config,
+        storage=service.storage,
+        github=cast(GitHubCLI, github),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(github)),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+    rebuilt.queue_manager.join_all()
+
+    refreshed_session = next(s for s in service.storage.list_sessions() if s.id == orphan.id)
+    assert refreshed_session.status in {"completed", "failed"}
+    assert refreshed_session.ended_at is not None
+
+
+def test_rehydrate_reconciles_drift_at_startup(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    terminal_job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        issue_number=200,
+        status="completed",
+        metadata={"title": "x", "body": "x"},
+    )
+    service.storage.create_job(terminal_job)
+    drift_session = SessionRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request",
+        runtime_handle="dani-issue_request-drift",
+        prompt_path=str(tmp_path / "p.txt"),
+        script_path=str(tmp_path / "r.sh"),
+        worktree_path=str(tmp_path),
+        job_id=terminal_job.id,
+        issue_number=200,
+        status="launched",
+    )
+    service.storage.create_session(drift_session)
+
+    DaniService(
+        service.config,
+        storage=service.storage,
+        github=cast(GitHubCLI, FakeGitHubCLI()),
+        codex_runner=cast(AgentRunner, FakeCodexRunner(FakeGitHubCLI())),
+        dev_syncer=FakeGitDevSyncer(),
+    )
+
+    reconciled = next(s for s in service.storage.list_sessions() if s.id == drift_session.id)
+    assert reconciled.status == "completed"
+    assert reconciled.termination_reason == "startup_drift_reconciled_from_completed"
+    assert reconciled.ended_at is not None
+
+
+def test_reconcile_orphan_session_handles_missing_session_id(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+    service._reconcile_orphan_session(None, new_status="failed", reason="x")
+    service._reconcile_orphan_session("does-not-exist", new_status="failed", reason="x")
+
+
 def test_issue_comment_with_ignore_signature_is_ignored_before_followup(tmp_path: Path) -> None:
     service, _, codex_runner = make_service(tmp_path)
     service.handle_event(
@@ -837,8 +1070,8 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
         repo_full_name="acme/demo",
         action="created",
         number=11,
-        actor_login="human",
-        payload={"issue": {"body": "context"}},
+        actor_login="acme",
+        payload={"issue": {"body": "context"}, "comment": {"id": 1, "author_association": "OWNER"}},
         body="/approve",
         title="Need automation",
     )
@@ -849,6 +1082,204 @@ def test_approve_comment_queues_implementation(tmp_path: Path) -> None:
     assert result["stage"] == "implementation"
     assert codex_runner.launches[0]["job"].stage == "implementation"
     assert service.storage.list_jobs()[0].status == "completed"
+
+
+def test_approve_from_repo_owner_login_queues_implementation(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=21,
+            actor_login="ACME",
+            payload={"issue": {"body": "context"}, "comment": {"id": 100}},
+            body="/approve",
+            title="Owner approval",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_with_owner_author_association_queues_implementation(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=22,
+            actor_login="some-account",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 101, "author_association": "OWNER"},
+            },
+            body="/approve",
+            title="Author association OWNER",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_with_member_author_association_queues_without_membership_api_call(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=23,
+            actor_login="alice",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 102, "author_association": "MEMBER"},
+            },
+            body="/approve",
+            title="Author association MEMBER",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
+    assert github.org_members_by_casefolded_org == {}
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_from_org_member_queues_implementation(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+    github.register_org_member("acme", "alice")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=24,
+            actor_login="ALICE",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 103, "author_association": "NONE"},
+            },
+            body="/approve",
+            title="Member fallthrough",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result["stage"] == "implementation"
+    assert codex_runner.launches[0]["job"].stage == "implementation"
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_from_unauthorized_actor_is_ignored_with_thumbs_down_reaction(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+    github.register_org_member("acme", "alice")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=25,
+            actor_login="malicious-user",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 12345, "author_association": "CONTRIBUTOR"},
+            },
+            body="/approve",
+            title="Unauthorized approve",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=25) == []
+    assert codex_runner.launches == []
+    assert github.recorded_issue_comment_reactions == [("acme/demo", 25, 12345, "-1")]
+
+
+def test_approve_from_collaborator_is_ignored(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=26,
+            actor_login="outside-collab",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 200, "author_association": "COLLABORATOR"},
+            },
+            body="/approve",
+            title="Collaborator approve",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert codex_runner.launches == []
+    assert github.recorded_issue_comment_reactions == [("acme/demo", 26, 200, "-1")]
+
+
+def test_approve_unauthorized_skips_reaction_when_comment_id_missing(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=27,
+            actor_login="malicious-user",
+            payload={"issue": {"body": "context"}},
+            body="/approve",
+            title="Missing comment id",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert codex_runner.launches == []
+    assert github.recorded_issue_comment_reactions == []
+
+
+def test_approve_unauthorized_swallows_reaction_failure(tmp_path: Path) -> None:
+    service, github, codex_runner = make_service(tmp_path)
+    github.simulated_reaction_failure = RuntimeError("github outage")
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=28,
+            actor_login="malicious-user",
+            payload={
+                "issue": {"body": "context"},
+                "comment": {"id": 999, "author_association": "NONE"},
+            },
+            body="/approve",
+            title="Reaction outage",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "approver_not_authorized"}
+    assert codex_runner.launches == []
 
 
 def test_failed_job_still_closes_runtime_handle_and_marks_failure(tmp_path: Path) -> None:
@@ -872,8 +1303,8 @@ def test_pr_opened_from_implementation_signature_queues_review_round(tmp_path: P
         repo_full_name="acme/demo",
         action="created",
         number=12,
-        actor_login="human",
-        payload={"issue": {"body": "Ship it"}},
+        actor_login="acme",
+        payload={"issue": {"body": "Ship it"}, "comment": {"id": 1, "author_association": "OWNER"}},
         body="/approve",
         title="Ship it",
     )
@@ -2189,8 +2620,7 @@ def test_final_verdict_stops_when_pr_is_closed(tmp_path: Path) -> None:
     assert github.merged == []
 
 
-def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
-    """A PR opened without any linked issue number is dropped as untracked."""
+def test_pr_opened_without_issue_reference_queues_single_review_round(tmp_path: Path) -> None:
     service, _, codex_runner = make_service(tmp_path)
 
     result = service.handle_event(
@@ -2208,10 +2638,102 @@ def test_pr_opened_without_issue_reference_is_ignored(tmp_path: Path) -> None:
             is_pull_request=True,
         )
     )
+    service.wait_for_idle()
+
+    assert result["stage"] == "review_round"
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert [job.review_round for job in review_jobs] == [1]
+    assert review_jobs[0].issue_number is None
+    assert review_jobs[0].metadata.get("untracked") is True
+    assert review_jobs[0].metadata.get("external_contribution") is True
+    assert codex_runner.launches[-1]["job"].stage == "review_round"
+
+
+def test_untracked_external_pr_caps_at_one_review_round(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            commit_sha="sha-initial",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    second = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="synchronize",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            commit_sha="sha-followup",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    assert second == {"status": "ignored", "reason": "untracked_external_review_round_consumed"}
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert [job.review_round for job in review_jobs] == [1]
+
+
+def test_untracked_external_pr_review_round_does_not_spawn_implementation(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=42,
+            actor_login="external-contributor",
+            payload={},
+            body="Some changes without issue reference",
+            title="External contribution",
+            base_branch="dev",
+            head_branch="feature/external",
+            is_pull_request=True,
+        )
+    )
+    service.wait_for_idle()
+
+    review_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42)
+    assert len(review_jobs) == 1
+    job_id = review_jobs[0].id
+
+    review_signature_event = NormalizedEvent(
+        kind="pull_request_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=42,
+        actor_login="agent",
+        payload={},
+        body=build_signature(stage="review_round", job=job_id, pr=42, round=1),
+        title="External contribution",
+        is_pull_request=True,
+    )
+    result = service.handle_event(review_signature_event)
+    service.wait_for_idle()
 
     assert result == {"status": "ignored", "reason": "untracked_pr"}
-    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="review_round", pr_number=42) == []
-    assert codex_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", pr_number=42) == []
+    assert all(launch["job"].stage != "implementation" for launch in codex_runner.launches)
 
 
 def test_review_round_without_issue_drops_untracked_pr(tmp_path: Path) -> None:
@@ -3148,3 +3670,401 @@ def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
     service.wait_for_idle()
 
     assert codex_runner.wait_calls[-1]["timeout_seconds"] == 5400
+
+
+def test_issue_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=58,
+            actor_login="human",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="closed",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert codex_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
+
+
+def test_issue_opened_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 58)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="opened",
+            number=58,
+            actor_login="h",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert codex_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=58) == []
+
+
+def test_issue_reopened_action_is_no_op(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_opened",
+            repo_full_name="acme/demo",
+            action="reopened",
+            number=58,
+            actor_login="h",
+            payload={},
+            body="b",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_reopened_no_op"}
+    assert codex_runner.launches == []
+
+
+def test_approve_on_closed_issue_does_not_queue_implementation(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=12,
+            actor_login="h",
+            payload={"issue": {"body": "x"}},
+            body="/approve",
+            title="t",
+            issue_state="closed",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert codex_runner.launches == []
+    assert service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=12) == []
+
+
+def test_approve_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 12)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=12,
+            actor_login="h",
+            payload={"issue": {"body": "x"}},
+            body="/approve",
+            title="t",
+            issue_state="open",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert codex_runner.launches == []
+
+
+def test_second_approve_for_same_issue_is_deduplicated(tmp_path: Path) -> None:
+    service, _, _codex_runner = make_service(tmp_path)
+    base_event = NormalizedEvent(
+        kind="issue_comment",
+        repo_full_name="acme/demo",
+        action="created",
+        number=13,
+        actor_login="acme",
+        payload={"issue": {"body": "x"}, "comment": {"id": 1, "author_association": "OWNER"}},
+        body="/approve",
+        title="t",
+        issue_state="open",
+    )
+
+    first = service.handle_event(base_event)
+    service.wait_for_idle()
+    second = service.handle_event(base_event)
+    service.wait_for_idle()
+
+    assert first["status"] == "queued"
+    assert first["stage"] == "implementation"
+    assert second == {"status": "ignored", "reason": "duplicate_implementation"}
+    impl_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=13)
+    assert len(impl_jobs) == 1
+
+
+def test_followup_from_dani_bot_login_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    service.config.bot_login = "danibot[bot]"
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=21,
+            actor_login="danibot[bot]",
+            payload={"issue": {"body": "x"}},
+            body="dani report",
+            title="t",
+            issue_state="open",
+            actor_type="Bot",
+        )
+    )
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "self_authored_comment"}
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []
+
+
+def test_followup_with_actor_type_bot_is_ignored_when_bot_login_unset(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    assert service.config.bot_login is None
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=22,
+            actor_login="some-bot",
+            payload={"issue": {"body": "x"}},
+            body="comment",
+            title="t",
+            issue_state="open",
+            actor_type="Bot",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "self_authored_comment"}
+    assert codex_runner.launches == []
+
+
+def test_followup_short_circuits_after_max_rounds(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    for _ in range(service.config.max_issue_followups):
+        service.storage.create_job(
+            JobRecord(
+                repo_full_name=repo.full_name,
+                stage="issue_followup",
+                issue_number=23,
+                status="completed",
+            )
+        )
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=23,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="more?",
+            title="t",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "max_followups_reached"}
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []
+
+
+def test_followup_on_closed_issue_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=24,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="hello",
+            title="t",
+            issue_state="closed",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_closed"}
+    assert codex_runner.launches == []
+
+
+def test_followup_after_terminal_issue_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    service.storage.mark_terminal_issue("acme/demo", 25)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=25,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="hello",
+            title="t",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert result == {"status": "ignored", "reason": "issue_terminal"}
+    assert codex_runner.launches == []
+
+
+def test_pull_request_opened_with_merged_state_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    event = make_pr_event(pr_number=88, action="synchronize", body="Implements #21")
+    event.pr_state = "closed"
+    event.pr_merged = True
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_merged"}
+    assert codex_runner.launches == []
+
+
+def test_pull_request_opened_with_closed_state_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    event = make_pr_event(pr_number=89, action="synchronize", body="Implements #22")
+    event.pr_state = "closed"
+    event.pr_merged = False
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_not_open"}
+    assert codex_runner.launches == []
+
+
+def test_pull_request_opened_after_terminal_pr_flag_is_ignored(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+    service.storage.mark_terminal_pr("acme/demo", 90, merged=True)
+    event = make_pr_event(pr_number=90, action="opened", body="Implements #23")
+
+    result = service.handle_event(event)
+    service.wait_for_idle()
+
+    assert result == {"status": "ignored", "reason": "pr_terminal"}
+    assert codex_runner.launches == []
+
+
+def test_pull_request_closed_merged_marks_terminal_pr_and_issue(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=70,
+            actor_login="danibot[bot]",
+            payload={},
+            body="Implements #58",
+            title="Feature/#70",
+            base_branch="dev",
+            head_branch="feature/#70",
+            commit_sha="x",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=True,
+            actor_type="Bot",
+        )
+    )
+
+    assert result == {"status": "marked_terminal", "pr_number": 70, "merged": True}
+    assert service.storage.is_terminal_pr("acme/demo", 70) is True
+    assert service.storage.is_terminal_issue("acme/demo", 58) is True
+
+
+def test_pull_request_closed_unmerged_marks_only_pr(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    result = service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=71,
+            actor_login="h",
+            payload={},
+            body="Implements #59",
+            title="Feature/#71",
+            base_branch="dev",
+            head_branch="feature/#71",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=False,
+        )
+    )
+
+    assert result == {"status": "marked_terminal", "pr_number": 71, "merged": False}
+    assert service.storage.is_terminal_pr("acme/demo", 71) is True
+    assert service.storage.is_terminal_issue("acme/demo", 59) is False
+
+
+def test_followup_after_pr_merged_is_short_circuited_end_to_end(tmp_path: Path) -> None:
+    service, _, codex_runner = make_service(tmp_path)
+
+    service.handle_event(
+        NormalizedEvent(
+            kind="pull_request_closed",
+            repo_full_name="acme/demo",
+            action="closed",
+            number=70,
+            actor_login="danibot[bot]",
+            payload={},
+            body="Implements #58",
+            title="Feature/#70",
+            base_branch="dev",
+            head_branch="feature/#70",
+            is_pull_request=True,
+            pr_state="closed",
+            pr_merged=True,
+            actor_type="Bot",
+        )
+    )
+
+    followup_result = service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=58,
+            actor_login="human",
+            payload={"issue": {"body": "x"}},
+            body="anything else?",
+            issue_state="open",
+            actor_type="User",
+        )
+    )
+
+    assert followup_result == {"status": "ignored", "reason": "issue_terminal"}
+    assert codex_runner.launches == []
+    assert codex_runner.resumes == []

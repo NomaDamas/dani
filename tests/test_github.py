@@ -329,3 +329,122 @@ def test_merge_pull_request_allows_branch_delete_failure_after_success(fake_repo
 
     assert fake_repo.pulls[7].merged is True
     assert fake_repo.pulls[7].delete_branch_calls == 1
+
+
+class FakeIssueComment:
+    def __init__(self, comment_id: int) -> None:
+        self.id = comment_id
+        self.created_reactions: list[str] = []
+
+    def create_reaction(self, reaction_type: str) -> dict[str, str]:
+        self.created_reactions.append(reaction_type)
+        return {"content": reaction_type}
+
+
+class FakeNamedUser:
+    def __init__(self, login: str) -> None:
+        self.login = login
+        self._identity = login
+
+
+class FakeOrganization:
+    def __init__(self, login: str, members: set[str] | None = None) -> None:
+        self.login = login
+        self._members: set[str] = set(members or set())
+
+    def has_in_members(self, user: FakeNamedUser) -> bool:
+        return user.login in self._members
+
+
+class _OrgClient:
+    def __init__(
+        self,
+        repo: FakeRepo,
+        *,
+        org: FakeOrganization | None = None,
+        org_lookup_error: Exception | None = None,
+        user_lookup_error: Exception | None = None,
+    ) -> None:
+        self.repo = repo
+        self._org = org
+        self._org_lookup_error = org_lookup_error
+        self._user_lookup_error = user_lookup_error
+        self.requested_orgs: list[str] = []
+        self.requested_users: list[str] = []
+        self.requested_repos: list[str] = []
+
+    def get_repo(self, repo_full_name: str) -> FakeRepo:
+        self.requested_repos.append(repo_full_name)
+        return self.repo
+
+    def get_organization(self, org_login: str) -> FakeOrganization:
+        self.requested_orgs.append(org_login)
+        if self._org_lookup_error is not None:
+            raise self._org_lookup_error
+        if self._org is None:
+            raise UnknownObjectException(status=404, data={"message": "Not Found"}, headers={})
+        return self._org
+
+    def get_user(self, login: str) -> FakeNamedUser:
+        self.requested_users.append(login)
+        if self._user_lookup_error is not None:
+            raise self._user_lookup_error
+        return FakeNamedUser(login)
+
+
+def test_is_org_member_returns_true_when_user_is_in_org(fake_repo: FakeRepo) -> None:
+    org = FakeOrganization("nomadamas", members={"alice", "bob"})
+    client = _OrgClient(fake_repo, org=org)
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: client)
+
+    assert github.is_org_member("nomadamas", "alice") is True
+    assert client.requested_orgs == ["nomadamas"]
+    assert client.requested_users == ["alice"]
+
+
+def test_is_org_member_returns_false_when_user_is_not_in_org(fake_repo: FakeRepo) -> None:
+    org = FakeOrganization("nomadamas", members={"alice"})
+    client = _OrgClient(fake_repo, org=org)
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: client)
+
+    assert github.is_org_member("nomadamas", "stranger") is False
+
+
+def test_is_org_member_returns_false_when_org_does_not_exist(fake_repo: FakeRepo) -> None:
+    client = _OrgClient(fake_repo, org=None)
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: client)
+
+    assert github.is_org_member("user-not-org", "alice") is False
+
+
+def test_is_org_member_returns_false_for_blank_username(fake_repo: FakeRepo) -> None:
+    org = FakeOrganization("nomadamas", members={"alice"})
+    client = _OrgClient(fake_repo, org=org)
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: client)
+
+    assert github.is_org_member("nomadamas", "") is False
+    assert client.requested_orgs == []
+    assert client.requested_users == []
+
+
+def test_is_org_member_returns_false_when_user_lookup_404s(fake_repo: FakeRepo) -> None:
+    org = FakeOrganization("nomadamas", members={"alice"})
+    client = _OrgClient(
+        fake_repo,
+        org=org,
+        user_lookup_error=UnknownObjectException(status=404, data={"message": "Not Found"}, headers={}),
+    )
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: client)
+
+    assert github.is_org_member("nomadamas", "ghost") is False
+
+
+def test_add_issue_comment_reaction_calls_create_reaction(fake_repo: FakeRepo) -> None:
+    fake_comment = FakeIssueComment(comment_id=999)
+    issue = fake_repo.issues[5]
+    issue.get_comment = lambda comment_id: fake_comment if comment_id == 999 else None  # type: ignore[attr-defined,assignment]
+    github = GitHubCLI(token="unit-test-token", client_factory=lambda _token: FakeClient(fake_repo))
+
+    github.add_issue_comment_reaction("acme/demo", 5, 999, "-1")
+
+    assert fake_comment.created_reactions == ["-1"]

@@ -56,7 +56,7 @@ Checklist:
 - [ ] Why this issue may not be needed
 - [ ] Expected Outcome
 - [ ] Evidence-based implementation plan (phrased as instructions for the implementation agent)
-- [ ] Open questions for the human (if any) — they must answer in a follow-up comment before /approve
+- [ ] Assumptions / human decisions to resolve asynchronously before /approve (if any)
 - [ ] Reminder that implementation starts only after a human comment containing "/approve"
 - [ ] Agent Signature
 
@@ -67,6 +67,14 @@ For the "Evidence-based implementation plan" section, report:
 
 Use this exact signature somewhere in the comment:
 $signature
+
+POST EXACTLY ONCE. Strict anti-duplicate contract:
+- Before calling `gh issue comment`, run:
+  gh issue view $issue_number --repo $repo --json comments --jq '.comments[].body' | grep -F '$signature' || true
+  If that command prints anything non-empty, a comment with this exact signature already exists. DO NOT post again. Exit immediately.
+- Call `gh issue comment` at most ONE time in this session.
+- After `gh issue comment` returns successfully, do not run it again under any circumstance — not for retries, not for self-review, not for "double-checking". Exit.
+- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. If the signature is already present, the post succeeded; do not retry; exit.
 
 Post it with gh (write the comment to a file first, then send it):
 gh issue comment $issue_number --repo $repo --body-file <comment-file.md>
@@ -97,10 +105,18 @@ Continue the existing issue discussion instead of restarting the analysis from s
 Write exactly one GitHub issue comment that addresses the new follow-up. The comment must:
 - Answer or clarify the user's follow-up directly.
 - Update the implementation plan if the follow-up changes scope/approach.
-- Note any remaining open questions the human must resolve before "/approve".
+- Note any assumptions / human decisions to resolve asynchronously before "/approve".
 - Remind the human that implementation starts only after a comment containing "/approve".
 - Include this exact signature on its own line:
 $signature
+
+POST EXACTLY ONCE. Strict anti-duplicate contract:
+- Before calling `gh issue comment`, run:
+  gh issue view $issue_number --repo $repo --json comments --jq '.comments[].body' | grep -F '$signature' || true
+  If that command prints anything non-empty, a comment with this exact signature already exists. DO NOT post again. Exit immediately.
+- Call `gh issue comment` at most ONE time in this session.
+- After `gh issue comment` returns successfully, do not run it again under any circumstance — not for retries, not for self-review, not for "double-checking". Exit.
+- If `gh issue comment` appears to fail, re-run the `gh issue view ... | grep` check before retrying. If the signature is already present, the post succeeded; do not retry; exit.
 
 Post it with gh (write the comment to a file first, then send it):
 gh issue comment $issue_number --repo $repo --body-file <followup-comment.md>
@@ -256,6 +272,20 @@ After the push succeeds, exit.
 }
 
 
+def ensure_non_interactive_guard(prompt: str) -> str:
+    """Return *prompt* with the non-interactive guard at the very top, once."""
+    if prompt.startswith(NON_INTERACTIVE_GUARD):
+        return prompt
+    return f"{NON_INTERACTIVE_GUARD}\n{prompt}"
+
+
+def split_non_interactive_guard(prompt: str) -> str:
+    """Return the prompt body after the non-interactive guard, if present."""
+    if not prompt.startswith(NON_INTERACTIVE_GUARD):
+        return prompt
+    return prompt.removeprefix(NON_INTERACTIVE_GUARD).lstrip("\n")
+
+
 def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str = "codex") -> str:
     del runtime
     template = TEMPLATES[template_name]
@@ -269,4 +299,4 @@ def render_prompt(template_name: str, context: dict[str, Any], *, runtime: str =
             "signature": build_signature(stage=template_name, job_id=context.get("job_id", "unknown")),
         }
     rendered = template.substitute({key: "" if value is None else str(value) for key, value in context.items()})
-    return f"{NON_INTERACTIVE_GUARD}\n{rendered}"
+    return ensure_non_interactive_guard(rendered)
