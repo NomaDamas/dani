@@ -5,14 +5,6 @@ from typing import Any
 
 from dani.signatures import build_signature
 
-# Non-interactive automation guard.
-#
-# dani drives agents in a non-interactive webhook-triggered loop. There is no
-# human attached to the session: any tool that waits for human input (notably
-# opencode's `question` tool) will block the session forever, eventually
-# tripping `agent_timeout_seconds` and failing the job. Codex does not expose
-# `question` today, but the guard is run-time-agnostic so future tool surface
-# changes can't reintroduce the same stall.
 NON_INTERACTIVE_GUARD = (
     "NON-INTERACTIVE AUTOMATION CONTRACT (read first):\n"
     "- You are running inside dani's non-interactive automation loop. There is NO human attached to this session.\n"
@@ -140,7 +132,7 @@ $pr_context
 
 Implement the approved change.
 Requirements:
-- Use $$omo:ulw-loop tdd manual qa commit well to finish the work
+- Use ulw-loop tdd manual qa commit well to finish the work
 - Write tests first (TDD)
 - Make all tests pass
 - Actually run the code and verify behavior

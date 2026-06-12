@@ -6,12 +6,19 @@ import pytest
 
 from dani.agent_runner import AgentRunner
 from dani.codex_runner import CodexRunner
-from dani.errors import ClaudeUsageLimitError, RolloutMissingError
+from dani.errors import RolloutMissingError
 from dani.github import GitHubCLI
-from dani.models import RUNTIME_CODEX, RUNTIME_OMO, DaniConfig, JobRecord, NormalizedEvent, SessionRecord
+from dani.models import (
+    RUNTIME_AUTO,
+    RUNTIME_CODEX,
+    RUNTIME_GAJAE,
+    DaniConfig,
+    JobRecord,
+    NormalizedEvent,
+    SessionRecord,
+)
 from dani.prompts import NON_INTERACTIVE_GUARD
 from dani.service import DaniService
-from dani.session_bridge import BridgeContext, OmoSessionBridge
 from dani.signatures import build_signature
 from dani.storage import JsonStorage
 from tests.helpers import FakeCodexRunner, FakeGitDevSyncer, FakeGitHubCLI, FakeRuntimeRunner
@@ -49,7 +56,7 @@ def make_service(
                 add_exact_review_signature(self.github, job)
             return session
 
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = ExactReviewSignatureCodexRunner(github)
@@ -64,38 +71,26 @@ def make_service(
     return service, github, codex_runner
 
 
-def make_omo_preferred_service(
+def make_auto_runtime_service(
     tmp_path: Path,
     *,
     dev_syncer: FakeGitDevSyncer | None = None,
-    bridge_context: BridgeContext | None = None,
 ) -> tuple[DaniService, FakeGitHubCLI, FakeRuntimeRunner, FakeRuntimeRunner]:
-    class StubBridge:
-        def __init__(self, context: BridgeContext | None) -> None:
-            self.context = context
-            self.calls: list[tuple[str, str | None]] = []
-
-        def load(self, *, repo_path: Path, session_id: str | None = None) -> BridgeContext | None:
-            self.calls.append((str(repo_path), session_id))
-            return self.context
-
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="auto")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omo_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_OMO)
+    gajae_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_GAJAE)
     codex_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
-    bridge = StubBridge(bridge_context)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        codex_runner=cast(CodexRunner, omo_runner),
+        codex_runner=cast(CodexRunner, codex_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
-        runtime_runners={RUNTIME_CODEX: cast(CodexRunner, codex_runner)},
-        session_bridge=cast(OmoSessionBridge, bridge),
+        runtime_runners={RUNTIME_GAJAE: cast(CodexRunner, gajae_runner)},
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, omo_runner, codex_runner
+    return service, github, gajae_runner, codex_runner
 
 
 def make_pr_event(
@@ -266,23 +261,8 @@ def test_general_issue_comment_without_existing_issue_session_is_ignored(tmp_pat
     assert codex_runner.resumes == []
 
 
-def test_issue_request_falls_back_from_omo_to_codex_on_claude_session_limit(tmp_path: Path) -> None:
-    bridge_context = BridgeContext(
-        prompt_block="Prior OMO context (imported summary; not a native resume):\n- Open thread: finish edge cases",
-        source_session_id="ses_prior_123",
-        note="from_test",
-    )
-    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path, bridge_context=bridge_context)
-    omo_runner.queue_wait_error(
-        ClaudeUsageLimitError(
-            "Claude usage limit reached",
-            "Claude usage limit reached",
-            "session_window",
-            reset_hint="in 5 hours",
-            suggested_retry_at="2026-04-22T08:00:00+00:00",
-        )
-    )
-
+def test_auto_runtime_routes_issue_request_to_gajae(tmp_path: Path) -> None:
+    service, _, gajae_runner, codex_runner = make_auto_runtime_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -298,72 +278,15 @@ def test_issue_request_falls_back_from_omo_to_codex_on_claude_session_limit(tmp_
     service.wait_for_idle()
 
     job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=51)[0]
-    sessions = service.storage.list_sessions()
     assert job.status == "completed"
-    assert job.metadata["preferred_runtime"] == RUNTIME_OMO
-    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
-    assert job.metadata["fallback_reason"] == "claude_session_window_limit"
-    assert job.metadata["usage_limit_kind"] == "session_window"
-    assert job.metadata["bridge_source_session_id"] == "ses_prior_123"
-    assert len(omo_runner.launches) == 1
-    assert len(codex_runner.launches) == 1
-    assert "Prior OMO context" in codex_runner.launches[0]["prompt"]
-    assert "not a native resume" in codex_runner.launches[0]["prompt"]
-    assert [session.effective_runtime for session in sessions] == [RUNTIME_OMO, RUNTIME_CODEX]
-    assert sessions[0].status == "failed"
-    assert sessions[1].status == "completed"
+    assert job.metadata["preferred_runtime"] == RUNTIME_GAJAE
+    assert job.metadata["effective_runtime"] == RUNTIME_GAJAE
+    assert len(gajae_runner.launches) == 1
+    assert codex_runner.launches == []
 
 
-def test_issue_request_uses_cached_claude_weekly_limit_to_start_directly_on_codex(tmp_path: Path) -> None:
-    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path)
-    service.storage.create_job(
-        JobRecord(
-            repo_full_name="acme/demo",
-            stage="issue_request",
-            issue_number=1,
-            status="failed",
-            metadata={
-                "usage_limit_runtime": RUNTIME_OMO,
-                "usage_limit_kind": "weekly",
-                "usage_limit_until": "2099-01-01T00:00:00+00:00",
-            },
-        )
-    )
-
-    service.handle_event(
-        NormalizedEvent(
-            kind="issue_opened",
-            repo_full_name="acme/demo",
-            action="opened",
-            number=52,
-            actor_login="human",
-            payload={},
-            body="Need automation",
-            title="Need automation",
-        )
-    )
-    service.wait_for_idle()
-
-    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_request", issue_number=52)[0]
-    assert job.status == "completed"
-    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
-    assert job.metadata["fallback_reason"] == "cached_claude_usage_limit"
-    assert omo_runner.launches == []
-    assert len(codex_runner.launches) == 1
-
-
-def test_issue_followup_after_omo_fallback_continues_on_codex_session(tmp_path: Path) -> None:
-    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path)
-    omo_runner.queue_wait_error(
-        ClaudeUsageLimitError(
-            "Opus weekly limit reached",
-            "weekly limit reached",
-            "weekly",
-            reset_hint="next week",
-            suggested_retry_at="2026-04-29T00:00:00+00:00",
-        )
-    )
-
+def test_auto_runtime_routes_issue_followup_after_gajae_planning_to_gajae(tmp_path: Path) -> None:
+    service, _, gajae_runner, codex_runner = make_auto_runtime_service(tmp_path)
     service.handle_event(
         NormalizedEvent(
             kind="issue_opened",
@@ -386,48 +309,82 @@ def test_issue_followup_after_omo_fallback_continues_on_codex_session(tmp_path: 
             number=53,
             actor_login="human",
             payload={"issue": {"body": "Need automation"}},
-            body="Please continue on the latest plan.",
+            body="Please refine the plan.",
             title="Need automation",
         )
     )
     service.wait_for_idle()
 
-    followup_job = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=53)[0]
+    followup_jobs = service.storage.find_jobs(repo_full_name="acme/demo", stage="issue_followup", issue_number=53)
     assert result["stage"] == "issue_followup"
-    assert followup_job.status == "completed"
-    assert followup_job.metadata["effective_runtime"] == RUNTIME_CODEX
-    assert len(omo_runner.resumes) == 0
-    assert len(codex_runner.resumes) == 1
-    assert codex_runner.resumes[0]["job"].stage == "issue_followup"
+    assert len(followup_jobs) == 1
+    assert followup_jobs[0].status == "completed"
+    assert followup_jobs[0].metadata["effective_runtime"] == RUNTIME_GAJAE
+    assert [record["job"].stage for record in gajae_runner.launches] == ["issue_request", "issue_followup"]
+    assert codex_runner.launches == []
 
 
-def test_service_build_prompt_uses_effective_runtime_not_configured_runtime(tmp_path: Path) -> None:
-    service, _, _, _ = make_omo_preferred_service(tmp_path)
+def test_auto_runtime_routes_implementation_to_codex(tmp_path: Path) -> None:
+    service, _, gajae_runner, codex_runner = make_auto_runtime_service(tmp_path)
+    service.handle_event(
+        NormalizedEvent(
+            kind="issue_comment",
+            repo_full_name="acme/demo",
+            action="created",
+            number=52,
+            actor_login="acme",
+            payload={"issue": {"body": "Need automation"}, "comment": {"id": 1, "author_association": "OWNER"}},
+            body="/approve",
+            title="Need automation",
+        )
+    )
+    service.wait_for_idle()
+
+    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="implementation", issue_number=52)[0]
+    assert job.status == "completed"
+    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
+    assert gajae_runner.launches == []
+    assert len(codex_runner.launches) == 1
+
+
+def test_auto_runtime_routes_final_verdict_to_gajae(tmp_path: Path) -> None:
+    service, _, gajae_runner, codex_runner = make_auto_runtime_service(tmp_path)
+    repo = service.storage.get_repo("acme/demo")
+    assert repo is not None
+    job = service.storage.create_job(JobRecord(repo_full_name="acme/demo", stage="final_verdict", pr_number=12))
+
+    service._run_job_attempt(repo, job)
+
+    assert gajae_runner.launches[0]["job"].stage == "final_verdict"
+    assert codex_runner.launches == []
+
+
+def test_auto_runtime_metadata_uses_stage_routing_for_issue_recovery(tmp_path: Path) -> None:
+    service, _, _, _ = make_auto_runtime_service(tmp_path)
+    job = JobRecord(
+        repo_full_name="acme/demo",
+        stage="issue_request_recovery",
+        issue_number=55,
+        metadata={"preferred_runtime": RUNTIME_AUTO},
+    )
+
+    assert service._preferred_runtime_for(job) == RUNTIME_GAJAE
+
+
+def test_service_build_prompt_uses_runtime_neutral_ulw_instruction(tmp_path: Path) -> None:
+    service, _, _, _ = make_auto_runtime_service(tmp_path)
     repo = service.storage.get_repo("acme/demo")
     assert repo is not None
     job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
 
     codex_prompt = service._build_prompt(repo, job, runtime=RUNTIME_CODEX)
-    omo_prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+    gajae_prompt = service._build_prompt(repo, job, runtime=RUNTIME_GAJAE)
     removed_command = f"${'ra'}{'lph'}"
 
-    assert "$omo:ulw-loop tdd manual qa commit well" in codex_prompt
+    assert "Use ulw-loop tdd manual qa commit well" in codex_prompt
     assert removed_command not in codex_prompt
-    assert removed_command not in omo_prompt
-    assert "$omo:ulw-loop tdd manual qa commit well" in omo_prompt
-
-
-def test_service_bridge_context_keeps_non_interactive_guard_first(tmp_path: Path) -> None:
-    service, _, _, _ = make_omo_preferred_service(tmp_path)
-    repo = service.storage.get_repo("acme/demo")
-    assert repo is not None
-    job = JobRecord(repo_full_name="acme/demo", stage="implementation", issue_number=54)
-
-    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO, bridge_prompt="IMPORTED OMO CONTEXT")
-
-    assert prompt.startswith(NON_INTERACTIVE_GUARD)
-    assert prompt.index("IMPORTED OMO CONTEXT") > prompt.index("DO NOT call the `question` tool")
-    assert prompt.count("NON-INTERACTIVE AUTOMATION CONTRACT") == 1
+    assert removed_command not in gajae_prompt
+    assert "Use ulw-loop tdd manual qa commit well" in gajae_prompt
 
 
 @pytest.mark.parametrize("stage", ["issue_request_recovery", "issue_followup_recovery"])
@@ -446,7 +403,7 @@ def test_issue_comment_recovery_prompt_includes_non_interactive_guard_first(tmp_
         },
     )
 
-    prompt = service._build_prompt(repo, job, runtime=RUNTIME_OMO)
+    prompt = service._build_prompt(repo, job, runtime=RUNTIME_GAJAE)
 
     assert prompt.startswith(NON_INTERACTIVE_GUARD)
     assert "DO NOT call the `question` tool" in prompt
@@ -536,7 +493,7 @@ def test_issue_comment_with_resumable_prior_session_still_resumes(
     repo = service.storage.get_repo("acme/demo")
     assert repo is not None
 
-    resumable_session_id = "ses_25ad70836ffemLP2sYPAkGq8hd"
+    resumable_session_id = "codex-resumable-session"
     resumable_session = SessionRecord(
         repo_full_name=repo.full_name,
         stage="issue_request",
@@ -553,7 +510,7 @@ def test_issue_comment_with_resumable_prior_session_still_resumes(
     monkeypatch.setattr(
         codex_runner,
         "can_resume",
-        lambda session_id: bool(session_id) and session_id.startswith("ses_"),
+        lambda session_id: bool(session_id) and session_id.startswith("codex-"),
     )
 
     service.handle_event(
@@ -1677,7 +1634,7 @@ def test_external_pr_unique_activity_never_queues_beyond_standard_review_limit(t
                 self.review_started.set()
                 self.release_review.wait(timeout=timeout_seconds)
 
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = BlockingCodexRunner(github)
@@ -2502,44 +2459,6 @@ def test_dev_sync_conflict_launches_codex_and_cleans_up(tmp_path: Path) -> None:
     assert jobs[0].status == "completed"
 
 
-def test_dev_sync_conflict_falls_back_from_omo_to_codex_on_weekly_limit(tmp_path: Path) -> None:
-    dev_syncer = FakeGitDevSyncer(conflict=True)
-    service, _, omo_runner, codex_runner = make_omo_preferred_service(tmp_path, dev_syncer=dev_syncer)
-    omo_runner.queue_wait_error(
-        ClaudeUsageLimitError(
-            "Opus weekly limit reached",
-            "weekly limit reached",
-            "weekly",
-            reset_hint="next week",
-            suggested_retry_at="2026-04-29T00:00:00+00:00",
-        )
-    )
-
-    result = service.handle_event(
-        NormalizedEvent(
-            kind="branch_push",
-            repo_full_name="acme/demo",
-            action="push",
-            number=0,
-            actor_login="human",
-            payload={},
-            ref="refs/heads/main",
-            commit_sha="abc123",
-        )
-    )
-    service.wait_for_idle()
-
-    job = service.storage.find_jobs(repo_full_name="acme/demo", stage="dev_sync")[0]
-    assert result["stage"] == "dev_sync"
-    assert job.status == "completed"
-    assert job.metadata["effective_runtime"] == RUNTIME_CODEX
-    assert job.metadata["usage_limit_kind"] == "weekly"
-    assert len(omo_runner.launches) == 1
-    assert len(codex_runner.launches) == 1
-    assert len(dev_syncer.verify_calls) == 1
-    assert len(dev_syncer.cleanup_calls) == 1
-
-
 def test_review_round_stops_when_pr_is_closed(tmp_path: Path) -> None:
     """Review round agent event is ignored when the PR has been closed."""
     service, github, _ = make_service(tmp_path)
@@ -2845,7 +2764,7 @@ class MissingIssueCommentRunner(FakeCodexRunner):
 def make_missing_comment_service(
     tmp_path: Path, *, recover: bool = True, resumable: bool = True
 ) -> tuple[DaniService, FakeGitHubCLI, MissingIssueCommentRunner]:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = MissingIssueCommentRunner(github, recover=recover, resumable=resumable)
@@ -3081,19 +3000,19 @@ class CommentRecoveryRuntimeRunner(FakeRuntimeRunner):
         return super().resume(repo_path, job, prompt, codex_session_id)
 
 
-def test_issue_request_recovery_resumes_source_effective_codex_session_when_preferred_runtime_is_omo(
+def test_issue_request_recovery_resumes_source_effective_codex_session_when_preferred_runtime_is_gajae(
     tmp_path: Path,
 ) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_OMO)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime=RUNTIME_GAJAE)
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    omo_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_OMO)
+    gajae_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_GAJAE)
     codex_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
-        codex_runner=cast(AgentRunner, omo_runner),
+        codex_runner=cast(AgentRunner, gajae_runner),
         dev_syncer=FakeGitDevSyncer(),
         runtime_runners={RUNTIME_CODEX: cast(AgentRunner, codex_runner)},
     )
@@ -3108,7 +3027,7 @@ def test_issue_request_recovery_resumes_source_effective_codex_session_when_pref
         metadata={
             "title": "Need planning",
             "body": "Need planning",
-            "preferred_runtime": RUNTIME_OMO,
+            "preferred_runtime": RUNTIME_GAJAE,
             "effective_runtime": RUNTIME_CODEX,
         },
     )
@@ -3124,7 +3043,7 @@ def test_issue_request_recovery_resumes_source_effective_codex_session_when_pref
             job_id=source_job.id,
             issue_number=48,
             codex_session_id="codex-original",
-            preferred_runtime=RUNTIME_OMO,
+            preferred_runtime=RUNTIME_GAJAE,
             effective_runtime=RUNTIME_CODEX,
             native_session_runtime=RUNTIME_CODEX,
         )
@@ -3136,11 +3055,11 @@ def test_issue_request_recovery_resumes_source_effective_codex_session_when_pref
 
     service._run_comment_recovery_attempt(repo, recovery_job)
 
-    assert omo_runner.resumes == []
-    assert omo_runner.launches == []
+    assert gajae_runner.resumes == []
+    assert gajae_runner.launches == []
     assert [record["codex_session_id"] for record in codex_runner.resumes] == ["codex-original"]
     assert codex_runner.launches == []
-    assert recovery_job.metadata["preferred_runtime"] == RUNTIME_OMO
+    assert recovery_job.metadata["preferred_runtime"] == RUNTIME_GAJAE
     assert recovery_job.metadata["source_effective_runtime"] == RUNTIME_CODEX
     assert recovery_job.metadata["effective_runtime"] == RUNTIME_CODEX
 
@@ -3148,7 +3067,7 @@ def test_issue_request_recovery_resumes_source_effective_codex_session_when_pref
 def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue_session_exists(
     tmp_path: Path,
 ) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = CommentRecoveryRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
@@ -3223,7 +3142,7 @@ def test_issue_request_recovery_prefers_source_job_session_when_newer_same_issue
 
 
 def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_fails(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = ResumeWaitFailureRecoveryRunner(github)
@@ -3259,7 +3178,7 @@ def test_issue_request_recovery_falls_back_to_fresh_launch_when_resumed_process_
 
 
 def test_issue_request_recovery_does_not_fresh_launch_when_resume_exception_posted_signature(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = ResumeExceptionAfterPostingRecoveryRunner(github)
@@ -3301,7 +3220,7 @@ def test_issue_request_recovery_does_not_fresh_launch_when_resume_exception_post
 
 
 def test_issue_request_recovery_does_not_fresh_launch_when_failed_resume_posted_signature(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = ResumeWaitFailureRecoveryRunner(github, post_before_failure=True)
@@ -3345,7 +3264,7 @@ def test_issue_request_recovery_does_not_fresh_launch_when_failed_resume_posted_
 def test_recovery_transient_exhaustion_fails_source_job_with_recovery_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = RecoveryTransientFailureRunner(github, recover=False)
@@ -3382,7 +3301,7 @@ def test_recovery_transient_exhaustion_fails_source_job_with_recovery_metadata(
 
 
 def test_service_rehydrates_queued_jobs_on_startup(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     first_service = DaniService(
@@ -3416,7 +3335,7 @@ def test_service_rehydrates_queued_jobs_on_startup(tmp_path: Path) -> None:
 
 
 def test_service_recovers_launched_jobs_on_startup(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     first_service = DaniService(
@@ -3456,7 +3375,7 @@ def test_service_recovers_launched_jobs_on_startup(tmp_path: Path) -> None:
 
 
 def test_service_completes_launched_job_on_startup_when_side_effect_exists(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     first_service = DaniService(
@@ -3512,7 +3431,7 @@ def test_job_status_is_launched_while_runner_waits(tmp_path: Path) -> None:
             self.wait_entered.set()
             assert self.release_wait.wait(timeout=2)
 
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     runner = BlockingWaitRunner(github, storage)
@@ -3549,7 +3468,7 @@ def test_job_status_is_launched_while_runner_waits(tmp_path: Path) -> None:
 
 
 def test_launched_dev_sync_is_requeued_on_startup(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     first_service = DaniService(
@@ -3585,7 +3504,7 @@ def test_launched_dev_sync_is_requeued_on_startup(tmp_path: Path) -> None:
 
 
 def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     first_service = DaniService(
@@ -3642,7 +3561,9 @@ def test_launched_comment_recovery_completes_source_job_on_startup(tmp_path: Pat
 
 
 def test_agent_timeout_config_is_passed_to_runner(tmp_path: Path) -> None:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_timeout_seconds=5400)
+    config = DaniConfig(
+        data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="codex", agent_timeout_seconds=5400
+    )
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
     codex_runner = FakeCodexRunner(github)

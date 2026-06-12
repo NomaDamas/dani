@@ -100,21 +100,22 @@ def test_build_config_agent_timeout_env_overrides_config_file(tmp_path: Path, mo
     assert config.agent_timeout_seconds == 5400
 
 
-def test_build_config_defaults_to_codex_runtime(tmp_path: Path, monkeypatch) -> None:
+def test_build_config_defaults_to_auto_runtime(tmp_path: Path, monkeypatch) -> None:
     data_dir = tmp_path / ".dani"
     monkeypatch.delenv("DANI_AGENT_RUNTIME", raising=False)
 
     config = cli_module.build_config(data_dir)
 
-    assert config.agent_runtime == "codex"
+    assert config.agent_runtime == "auto"
 
 
 def test_normalize_runtime_rejects_removed_alias() -> None:
     assert normalize_runtime(None) == "codex"
     assert normalize_runtime("codex") == "codex"
-    rejected_alias = "o" + "mx"
+    assert normalize_runtime("gajae-code") == "gajae"
+    assert normalize_runtime("gjc") == "gajae"
     with pytest.raises(ValueError, match="unknown agent runtime"):
-        normalize_runtime(rejected_alias)
+        normalize_runtime("made-up-runtime")
 
 
 def test_build_config_defaults_for_bot_login_and_max_issue_followups(tmp_path: Path, monkeypatch) -> None:

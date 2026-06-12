@@ -105,7 +105,7 @@ def _resolve_max_issue_followups(config_payload: dict[str, object]) -> int:
 def build_config(data_dir: Path, host: str = "127.0.0.1", port: int = 8787) -> DaniConfig:
     config_payload = _load_config_file(data_dir)
     secret = os.environ.get("DANI_WEBHOOK_SECRET", "")
-    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "codex"))
+    agent_runtime = os.environ.get("DANI_AGENT_RUNTIME") or str(config_payload.get("agent_runtime", "auto"))
     agent_timeout_seconds = _resolve_agent_timeout_seconds(config_payload)
     bot_login = _resolve_bot_login(config_payload)
     max_issue_followups = _resolve_max_issue_followups(config_payload)

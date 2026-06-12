@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any, TypedDict
 
-from dani.errors import ClaudeUsageLimitError, TransientCapacityError
+from dani.errors import TransientCapacityError
 from dani.git_sync import DevSyncConflictError, DevSyncContext, DevSyncOutcome
 from dani.github import MergeConflictError
 from dani.models import JobRecord, SessionRecord
@@ -241,12 +241,12 @@ class FakeCodexRunner:
         )
 
     def _post_side_effect(self, repo_full_name: str, job: JobRecord, signature: dict[str, str] | None) -> None:
-        if job.stage == "issue_request":
+        if job.stage in {"issue_request", "issue_followup"}:
             issue_number = int((signature or {}).get("issue", job.issue_number or 0))
             self.github.add_issue_signature(
                 repo_full_name,
                 issue_number,
-                build_signature(stage="issue_request", job=job.id, issue=issue_number),
+                build_signature(stage=job.stage, job=job.id, issue=issue_number),
             )
         elif job.stage in {"issue_request_recovery", "issue_followup_recovery"}:
             self._post_recovery_side_effect(repo_full_name, job)
@@ -337,14 +337,14 @@ class FakeCodexRunner:
         return None
 
     def can_resume(self, session_id: str) -> bool:
-        return bool(session_id) and not session_id.startswith("ses_")
+        return bool(session_id) and not session_id.startswith("gjc-")
 
 
 class FakeRuntimeRunner(FakeCodexRunner):
     def __init__(self, github: FakeGitHubCLI, *, runtime_name: str) -> None:
         super().__init__(github)
         self.runtime_name = runtime_name
-        self.session_id_prefix = "ses_" if runtime_name == "omo" else "codex-"
+        self.session_id_prefix = "gjc-" if runtime_name == "gajae" else "codex-"
         self.wait_errors: list[Exception] = []
 
     def queue_wait_error(self, exc: Exception) -> None:
@@ -355,7 +355,7 @@ class FakeRuntimeRunner(FakeCodexRunner):
         matches = re.findall(r"<!--\s*dani:([^>]+)\s*-->", prompt)
         signature = parse_signature(f"<!-- dani:{matches[-1]} -->") if matches else None
         pending_wait_error = self.wait_errors[0] if self.wait_errors else None
-        should_skip_side_effect = isinstance(pending_wait_error, (ClaudeUsageLimitError, TransientCapacityError))
+        should_skip_side_effect = isinstance(pending_wait_error, TransientCapacityError)
         if self._transient_failures_remaining == 0 and not should_skip_side_effect:
             self._post_side_effect(repo_full_name, job, signature)
         self.launches.append({"repo_path": str(repo_path), "job": job, "prompt": prompt})

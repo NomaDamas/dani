@@ -7,7 +7,8 @@ from typing import Any
 from uuid import uuid4
 
 RUNTIME_CODEX = "codex"
-RUNTIME_OMO = "omo"
+RUNTIME_GAJAE = "gajae"
+RUNTIME_AUTO = "auto"
 DEFAULT_AGENT_TIMEOUT_SECONDS = 3600.0
 
 
@@ -18,8 +19,8 @@ def utc_now() -> str:
 def infer_runtime_from_session_id(session_id: str | None) -> str | None:
     if not session_id:
         return None
-    if session_id.startswith("ses_"):
-        return RUNTIME_OMO
+    if session_id.startswith("gjc-"):
+        return RUNTIME_GAJAE
     return RUNTIME_CODEX
 
 
@@ -126,7 +127,7 @@ class DaniConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     review_rounds: int = 3
-    agent_runtime: str = "codex"
+    agent_runtime: str = RUNTIME_AUTO
     agent_timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
     bot_login: str | None = None
     max_issue_followups: int = DEFAULT_MAX_ISSUE_FOLLOWUPS

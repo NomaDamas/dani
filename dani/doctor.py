@@ -18,7 +18,7 @@ Sacred contract (enforced by tests):
 4. CROSS-PLATFORM — darwin + linux (no Windows).
 5. NO SECRET LEAKAGE — never prints any value of ``DANI_WEBHOOK_SECRET``,
    ``DANI_GITHUB_TOKEN``, ``GITHUB_TOKEN``, ``GH_TOKEN``, ``GITHUB_PAT``.
-   Never prints raw ``ps`` argv (OMX argv contains full agent prompts).
+   Never prints raw ``ps`` argv (agent argv can contain full prompts).
 6. NO ``--fix`` IN v1 — separate future command.
 
 Exit codes:
@@ -821,16 +821,14 @@ def resolve_port(explicit: int | None, env: Mapping[str, str], default: int = 87
 
 
 VALID_AGENT_RUNTIMES = frozenset({
-    "omx",
-    "oh-my-codex",
+    "auto",
     "codex",
-    "omo",
-    "oh-my-openagents",
-    "oh-my-openagent",
-    "opencode",
+    "gajae",
+    "gajae-code",
+    "gjc",
 })
-OMX_FAMILY = frozenset({"omx", "oh-my-codex", "codex"})
-OMO_FAMILY = frozenset({"omo", "oh-my-openagents", "oh-my-openagent", "opencode"})
+CODEX_FAMILY = frozenset({"auto", "codex"})
+GAJAE_FAMILY = frozenset({"auto", "gajae", "gajae-code", "gjc"})
 
 
 def _resolved_agent_runtime(ctx: CheckContext) -> str:
@@ -839,7 +837,7 @@ def _resolved_agent_runtime(ctx: CheckContext) -> str:
         return env_value
     if ctx.config_parsed and "agent_runtime" in ctx.config_parsed:
         return str(ctx.config_parsed["agent_runtime"])
-    return "codex"
+    return "auto"
 
 
 def _resolved_agent_timeout(ctx: CheckContext) -> float:
@@ -954,7 +952,6 @@ def _binary_record(
 @register_check("binaries")
 def _check_binaries(ctx: CheckContext) -> CheckResult:
     runtime = _resolved_agent_runtime(ctx).lower()
-    has_external_opencode = bool(ctx.env.get("DANI_OPENCODE_SERVER_URL"))
     records: list[dict[str, Any]] = []
 
     records.append(
@@ -974,21 +971,13 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
         )
     )
 
-    if runtime in OMX_FAMILY:
+    if runtime in CODEX_FAMILY:
         records.append(
             _binary_record(
                 "codex",
                 required=True,
                 timeout_seconds=ctx.timeout_seconds,
                 severity_when_missing=CheckStatus.FAIL,
-            )
-        )
-        records.append(
-            _binary_record(
-                "omx",
-                required=False,
-                timeout_seconds=ctx.timeout_seconds,
-                severity_when_missing=CheckStatus.WARN,
             )
         )
     else:
@@ -1000,27 +989,18 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
             "skip_reason": f"agent_runtime={runtime}",
         })
 
-    if runtime in OMO_FAMILY:
-        if has_external_opencode:
-            records.append({
-                "name": "opencode",
-                "found": None,
-                "required": False,
-                "severity": CheckStatus.SKIP.value,
-                "skip_reason": "DANI_OPENCODE_SERVER_URL set (external server)",
-            })
-        else:
-            records.append(
-                _binary_record(
-                    "opencode",
-                    required=True,
-                    timeout_seconds=ctx.timeout_seconds,
-                    severity_when_missing=CheckStatus.FAIL,
-                )
+    if runtime in GAJAE_FAMILY:
+        records.append(
+            _binary_record(
+                "gjc",
+                required=True,
+                timeout_seconds=ctx.timeout_seconds,
+                severity_when_missing=CheckStatus.FAIL,
             )
+        )
     else:
         records.append({
-            "name": "opencode",
+            "name": "gjc",
             "found": None,
             "required": False,
             "severity": CheckStatus.SKIP.value,
@@ -1032,7 +1012,6 @@ def _check_binaries(ctx: CheckContext) -> CheckResult:
 
     details = {
         "runtime": runtime,
-        "external_opencode_server": has_external_opencode,
         "binaries": records,
     }
 
@@ -1770,12 +1749,8 @@ def _ps_run(args: list[str], *, timeout_s: float) -> tuple[int, list[str]]:
 def _classify_ps_command(command: str) -> str | None:
     if "codex exec" in command:
         return "codex_exec"
-    if "omx exec" in command:
-        return "omx_exec"
-    if "opencode serve" in command:
-        return "opencode_serve"
-    if "opencode run" in command:
-        return "opencode_run"
+    if "gjc --print" in command:
+        return "gjc_print"
     return None
 
 
@@ -1798,7 +1773,7 @@ def _check_process_sprawl(ctx: CheckContext) -> CheckResult:
         if len(parts) >= 3:
             pid_records.append((parts[0].strip(), parts[1].strip(), parts[2].strip()))
 
-    classifier_counts: dict[str, int] = {"omx_exec": 0, "opencode_serve": 0, "opencode_run": 0}
+    classifier_counts: dict[str, int] = {"codex_exec": 0, "gjc_print": 0}
     samples: list[dict[str, Any]] = []
     sample_cap = 10
 

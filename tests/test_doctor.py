@@ -224,10 +224,10 @@ def test_read_only_config_non_object(tmp_path: Path):
 
 def test_read_only_config_happy(tmp_path: Path):
     (tmp_path / "config.json").write_text(
-        json.dumps({"agent_runtime": "omx", "agent_timeout_seconds": 1800}), encoding="utf-8"
+        json.dumps({"agent_runtime": "gajae", "agent_timeout_seconds": 1800}), encoding="utf-8"
     )
     parsed, error = read_only_config(tmp_path)
-    assert parsed == {"agent_runtime": "omx", "agent_timeout_seconds": 1800}
+    assert parsed == {"agent_runtime": "gajae", "agent_timeout_seconds": 1800}
     assert error is None
 
 
@@ -545,50 +545,44 @@ def test_config_env_fail_on_config_parse_error(tmp_path: Path):
 
 def test_binaries_fail_when_git_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("shutil.which", lambda name: None)
-    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omx"})
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "gajae"})
     result = _check_binaries(ctx)
     assert result.status == CheckStatus.FAIL
     assert "git" in result.summary
 
 
-def test_binaries_ok_omx_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_binaries_ok_auto_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake_paths = {
         "git": "/usr/bin/git",
         "gh": "/usr/bin/gh",
-        "omx": "/usr/bin/omx",
         "codex": "/usr/bin/codex",
+        "gjc": "/usr/bin/gjc",
     }
     monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
     monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
-    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omx"})
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "auto"})
     result = _check_binaries(ctx)
     assert result.status == CheckStatus.OK
 
 
-def test_binaries_omo_external_server_skips_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    fake_paths = {"git": "/usr/bin/git", "gh": "/usr/bin/gh"}
+def test_binaries_gajae_runtime_skips_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fake_paths = {"git": "/usr/bin/git", "gh": "/usr/bin/gh", "gjc": "/usr/bin/gjc"}
     monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
     monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
-    ctx = _make_ctx(
-        tmp_path,
-        env={
-            "DANI_AGENT_RUNTIME": "omo",
-            "DANI_OPENCODE_SERVER_URL": "http://127.0.0.1:4096",
-        },
-    )
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "gajae"})
     result = _check_binaries(ctx)
     assert result.status == CheckStatus.OK
-    opencode_rec = next(r for r in result.details["binaries"] if r["name"] == "opencode")
-    assert opencode_rec["severity"] == "skip"
+    codex_rec = next(r for r in result.details["binaries"] if r["name"] == "codex")
+    assert codex_rec["severity"] == "skip"
 
 
-def test_binaries_omo_runtime_fails_without_opencode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_binaries_gajae_runtime_fails_without_gjc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/git" if name == "git" else None)
     monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
-    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "omo"})
+    ctx = _make_ctx(tmp_path, env={"DANI_AGENT_RUNTIME": "gajae"})
     result = _check_binaries(ctx)
     assert result.status == CheckStatus.FAIL
-    assert "opencode" in result.summary
+    assert "gjc" in result.summary
 
 
 def test_storage_files_ok(populated_data_dir: Path):
@@ -1007,10 +1001,10 @@ def test_process_sprawl_ok_under_threshold(tmp_path: Path, monkeypatch: pytest.M
         "dani.doctor._ps_run",
         lambda *a, **kw: (0, ["1234 1 01:23"]),
     )
-    monkeypatch.setattr("dani.doctor._classify_ps_command", lambda cmd: "omx_exec" if "omx" in cmd else None)
+    monkeypatch.setattr("dani.doctor._classify_ps_command", lambda cmd: "gjc_print" if "gjc" in cmd else None)
     monkeypatch.setattr(
         "dani.doctor._ps_run",
-        lambda args, **kw: (0, ["1234 1 01:23"]) if "-axo" in args else (0, ["omx exec something"]),
+        lambda args, **kw: (0, ["1234 1 01:23"]) if "-axo" in args else (0, ["gjc --print something"]),
     )
     ctx = _make_ctx(tmp_path)
     result = _check_process_sprawl(ctx)
@@ -1023,7 +1017,7 @@ def test_process_sprawl_warn_over_threshold(tmp_path: Path, monkeypatch: pytest.
     def fake_ps_run(args, *, timeout_s):
         if "-axo" in args:
             return 0, pids
-        return 0, ["omx exec full prompt that should never leak"]
+        return 0, ["gjc --print full prompt that should never leak"]
 
     monkeypatch.setattr("dani.doctor._ps_run", fake_ps_run)
     ctx = _make_ctx(tmp_path)
@@ -1045,8 +1039,8 @@ def test_e2e_happy_path_runs_all_checks(populated_data_dir: Path, monkeypatch: p
     fake_paths = {
         "git": "/usr/bin/git",
         "gh": "/usr/bin/gh",
-        "omx": "/usr/bin/omx",
         "codex": "/usr/bin/codex",
+        "gjc": "/usr/bin/gjc",
     }
     monkeypatch.setattr("shutil.which", lambda name: fake_paths.get(name))
     monkeypatch.setattr("dani.doctor._probe_binary_version", lambda binary, *, timeout_seconds: "v1")
@@ -1073,7 +1067,7 @@ def test_e2e_happy_path_runs_all_checks(populated_data_dir: Path, monkeypatch: p
     env = {
         "DANI_WEBHOOK_SECRET": "secret",
         "DANI_GITHUB_TOKEN": "tok",
-        "DANI_AGENT_RUNTIME": "omx",
+        "DANI_AGENT_RUNTIME": "auto",
     }
     result = runner.invoke(app, ["doctor", "--data-dir", str(populated_data_dir), "--json"], env=env)
     assert result.exit_code == 0

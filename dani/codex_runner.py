@@ -179,7 +179,7 @@ class CodexRunner:
         return None
 
     def can_resume(self, session_id: str) -> bool:
-        return bool(session_id) and not session_id.startswith("ses_")
+        return bool(session_id) and not session_id.startswith("gjc-")
 
     def _capture_codex_session_id(
         self,

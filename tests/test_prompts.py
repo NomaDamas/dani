@@ -7,7 +7,7 @@ REMOVED_REVIEW_COMMAND = f"${'code'}-{'review'}"
 REMOVED_PLAN_CRITIC = f"{'Mo'}{'mus'}-Plan-Critic"
 
 
-def test_implementation_prompt_uses_ulw_loop_skill_invocation() -> None:
+def test_implementation_prompt_uses_ulw_loop_instruction() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -25,12 +25,12 @@ def test_implementation_prompt_uses_ulw_loop_skill_invocation() -> None:
         },
     )
 
-    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert "Use ulw-loop tdd manual qa commit well" in prompt
     assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
     assert "<!-- dani:stage=implementation;job=abc;issue=7 -->" in prompt
 
 
-def test_implementation_prompt_for_omo_keeps_ulw_loop_skill_invocation() -> None:
+def test_implementation_prompt_for_gajae_keeps_ulw_loop_instruction() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -46,14 +46,14 @@ def test_implementation_prompt_for_omo_keeps_ulw_loop_skill_invocation() -> None
             "signature": "<!-- dani:stage=implementation;job=abc;issue=7 -->",
             "signature_instructions": "Use this signature in the PR body:\n<!-- dani:stage=implementation;job=abc;issue=7 -->",
         },
-        runtime="omo",
+        runtime="gajae",
     )
 
     assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
-    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert "Use ulw-loop tdd manual qa commit well" in prompt
 
 
-def test_implementation_prompt_for_codex_explicit_runtime_uses_ulw_loop_skill_invocation() -> None:
+def test_implementation_prompt_for_codex_explicit_runtime_uses_ulw_loop_instruction() -> None:
     prompt = render_prompt(
         "implementation",
         {
@@ -72,7 +72,7 @@ def test_implementation_prompt_for_codex_explicit_runtime_uses_ulw_loop_skill_in
         runtime="codex",
     )
 
-    assert "$omo:ulw-loop tdd manual qa commit well" in prompt
+    assert "Use ulw-loop tdd manual qa commit well" in prompt
     assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
 
 
@@ -372,8 +372,8 @@ def test_issue_followup_prompt_keeps_signature_on_own_line() -> None:
     assert signature_lines, "issue_followup must emit the signature on its own line for downstream parsers"
 
 
-def test_issue_followup_prompt_for_omo_does_not_use_removed_skill_commands() -> None:
-    prompt = render_prompt("issue_followup", _issue_followup_context(), runtime="omo")
+def test_issue_followup_prompt_for_gajae_does_not_use_removed_skill_commands() -> None:
+    prompt = render_prompt("issue_followup", _issue_followup_context(), runtime="gajae")
 
     assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
     assert REMOVED_REVIEW_COMMAND not in prompt
@@ -400,7 +400,7 @@ def test_review_round_prompt_requires_code_review_and_verification() -> None:
     assert "gh pr comment 5 --repo acme/demo --body-file <review-comment.md>" in prompt
 
 
-def test_review_round_prompt_for_omo_uses_plain_codex_review_guidance() -> None:
+def test_review_round_prompt_for_gajae_uses_plain_codex_review_guidance() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -412,7 +412,7 @@ def test_review_round_prompt_for_omo_uses_plain_codex_review_guidance() -> None:
             "round_number": 2,
             "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
         },
-        runtime="omo",
+        runtime="gajae",
     )
 
     assert REMOVED_REVIEW_COMMAND not in prompt
@@ -420,7 +420,7 @@ def test_review_round_prompt_for_omo_uses_plain_codex_review_guidance() -> None:
     assert "Use Codex's normal code review judgment" in prompt
 
 
-def test_review_round_prompt_for_omo_does_not_mention_removed_implementation_command() -> None:
+def test_review_round_prompt_for_gajae_does_not_mention_removed_implementation_command() -> None:
     prompt = render_prompt(
         "review_round",
         {
@@ -432,7 +432,7 @@ def test_review_round_prompt_for_omo_does_not_mention_removed_implementation_com
             "round_number": 2,
             "signature": "<!-- dani:stage=review_round;job=abc;pr=5;round=2 -->",
         },
-        runtime="omo",
+        runtime="gajae",
     )
 
     assert REMOVED_IMPLEMENTATION_COMMAND not in prompt
@@ -616,7 +616,7 @@ def test_split_non_interactive_guard_accepts_unguarded_prompt() -> None:
 
 
 @pytest.mark.parametrize("template_name", sorted(TEMPLATES))
-@pytest.mark.parametrize("runtime", ["codex", "omo"])
+@pytest.mark.parametrize("runtime", ["codex", "gajae"])
 def test_every_template_prepends_non_interactive_guard(
     template_name: str,
     runtime: str,

@@ -1,13 +1,18 @@
 [project]
 name = "dani"
 version = "0.0.1"
-description = "Simple loop for managing Github Repository; Backend is Codex or Oh-My-OpenAgents"
+description = "Experimental local-first GitHub webhook automation for Gajae-Code and Codex agents"
 authors = [{ name = "NomaDamas", email = "vkehfdl1@gmail.com" }]
 readme = "README.md"
-keywords = ["python"]
+license = "MIT"
+keywords = ["agent", "automation", "codex", "gajae-code", "github", "webhook"]
 requires-python = ">=3.10,<4.0"
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -31,6 +36,7 @@ dani = "dani.cli:app"
 Homepage = "https://github.com/NomaDamas/dani"
 Repository = "https://github.com/NomaDamas/dani"
 Documentation = "https://github.com/NomaDamas/dani"
+Issues = "https://github.com/NomaDamas/dani/issues"
 
 [dependency-groups]
 dev = [
@@ -87,7 +93,9 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106"]
+"tests/test_release_surface.py" = ["S101", "S105", "S106", "S603", "S607"]
 "dani/codex_runner.py" = ["S607"]
+"dani/gajae_runner.py" = ["S603"]
 "scripts/dev/**" = ["S101", "S108", "S603", "S607", "T201"]
 
 [tool.ruff.format]

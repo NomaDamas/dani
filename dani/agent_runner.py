@@ -3,14 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from dani.models import DEFAULT_AGENT_TIMEOUT_SECONDS, JobRecord, SessionRecord
+from dani.models import (
+    DEFAULT_AGENT_TIMEOUT_SECONDS,
+    RUNTIME_AUTO,
+    RUNTIME_CODEX,
+    RUNTIME_GAJAE,
+    JobRecord,
+    SessionRecord,
+)
 
 RUNTIME_ALIASES: dict[str, str] = {
-    "codex": "codex",
-    "omo": "omo",
-    "oh-my-openagents": "omo",
-    "oh-my-openagent": "omo",
-    "opencode": "omo",
+    RUNTIME_AUTO: RUNTIME_AUTO,
+    RUNTIME_CODEX: RUNTIME_CODEX,
+    RUNTIME_GAJAE: RUNTIME_GAJAE,
+    "gajae-code": RUNTIME_GAJAE,
+    "gjc": RUNTIME_GAJAE,
 }
 
 
@@ -25,7 +32,7 @@ class ManagedProcess(Protocol):
 class AgentRunner(Protocol):
     """Protocol every dani agent runtime adapter must satisfy.
 
-    Implementations wrap an external agent CLI (codex, opencode, ...) and expose
+    Implementations wrap an external agent CLI (codex, gjc, ...) and expose
     a uniform interface to ``DaniService`` for launching a new agent session,
     resuming an existing one, waiting for completion, and releasing process
     resources.
@@ -59,22 +66,23 @@ class AgentRunner(Protocol):
 
 
 def normalize_runtime(runtime: str | None) -> str:
-    normalized = (runtime or "codex").strip().lower()
+    normalized = (runtime or RUNTIME_CODEX).strip().lower()
     if normalized in RUNTIME_ALIASES:
         return RUNTIME_ALIASES[normalized]
-    msg = f"unknown agent runtime: {runtime!r} (expected 'codex' or 'omo')"
+    msg = f"unknown agent runtime: {runtime!r} (expected 'auto', 'codex', or 'gajae')"
     raise ValueError(msg)
 
 
 def build_agent_runner(runtime: str, run_dir: Path) -> AgentRunner:
-    """Factory returning the AgentRunner matching *runtime* (``codex`` or ``omo``)."""
     from dani.codex_runner import CodexRunner
-    from dani.omo_http_runner import OmoHttpRunner
+    from dani.gajae_runner import GajaeRunner
 
     normalized = normalize_runtime(runtime)
-    if normalized == "codex":
+    if normalized == RUNTIME_AUTO:
+        normalized = RUNTIME_CODEX
+    if normalized == RUNTIME_CODEX:
         return CodexRunner(run_dir)
-    if normalized == "omo":
-        return OmoHttpRunner(run_dir)
-    msg = f"unknown agent runtime: {runtime!r} (expected 'codex' or 'omo')"
+    if normalized == RUNTIME_GAJAE:
+        return GajaeRunner(run_dir)
+    msg = f"unknown agent runtime: {runtime!r} (expected 'auto', 'codex', or 'gajae')"
     raise ValueError(msg)

@@ -8,16 +8,14 @@ import pytest
 
 from dani.agent_runner import AgentRunner
 from dani.errors import (
-    ClaudeUsageLimitError,
     TransientCapacityError,
-    check_claude_usage_limit_error,
     check_transient_capacity_error,
 )
 from dani.github import GitHubCLI
-from dani.models import DaniConfig, NormalizedEvent
+from dani.models import RUNTIME_CODEX, RUNTIME_GAJAE, DaniConfig, NormalizedEvent
 from dani.service import RETRY_BACKOFF_SECONDS, DaniService
 from dani.storage import JsonStorage
-from tests.helpers import FakeCodexRunner, FakeGitDevSyncer, FakeGitHubCLI
+from tests.helpers import FakeGitDevSyncer, FakeGitHubCLI, FakeRuntimeRunner
 
 _CAPACITY_MSG = "capacity"
 
@@ -26,20 +24,22 @@ TEST_SECRET = "unit-test-secret"
 
 def make_service(
     tmp_path: Path, *, dev_syncer: FakeGitDevSyncer | None = None
-) -> tuple[DaniService, FakeGitHubCLI, FakeCodexRunner]:
-    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET)
+) -> tuple[DaniService, FakeGitHubCLI, FakeRuntimeRunner]:
+    config = DaniConfig(data_dir=tmp_path / ".dani", webhook_secret=TEST_SECRET, agent_runtime="auto")
     storage = JsonStorage(config)
     github = FakeGitHubCLI()
-    codex_runner = FakeCodexRunner(github)
+    codex_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_CODEX)
+    gajae_runner = FakeRuntimeRunner(github, runtime_name=RUNTIME_GAJAE)
     service = DaniService(
         config,
         storage=storage,
         github=cast(GitHubCLI, github),
         codex_runner=cast(AgentRunner, codex_runner),
         dev_syncer=dev_syncer or FakeGitDevSyncer(),
+        runtime_runners={RUNTIME_GAJAE: cast(AgentRunner, gajae_runner)},
     )
     service.register_repo("acme/demo", str(tmp_path))
-    return service, github, codex_runner
+    return service, github, gajae_runner
 
 
 def _issue_event(number: int = 11) -> NormalizedEvent:
@@ -76,27 +76,6 @@ class TestCheckTransientCapacityError:
 
     def test_ignores_empty_string(self) -> None:
         check_transient_capacity_error("")
-
-
-class TestCheckClaudeUsageLimitError:
-    def test_detects_session_window_limit(self) -> None:
-        with pytest.raises(ClaudeUsageLimitError) as exc_info:
-            check_claude_usage_limit_error("Claude usage limit reached. Your limit will reset at 3 PM.")
-
-        assert exc_info.value.limit_type == "session_window"
-        assert exc_info.value.reset_hint == "3 PM"
-        assert exc_info.value.suggested_retry_at is not None
-
-    def test_detects_weekly_limit(self) -> None:
-        with pytest.raises(ClaudeUsageLimitError) as exc_info:
-            check_claude_usage_limit_error("Opus weekly limit reached. It resets on Monday morning.")
-
-        assert exc_info.value.limit_type == "weekly"
-        assert exc_info.value.reset_hint == "Monday morning"
-        assert exc_info.value.suggested_retry_at is not None
-
-    def test_ignores_generic_rate_limit_language(self) -> None:
-        check_claude_usage_limit_error("rate limit exceeded")
 
 
 # --- service.py retry integration tests ---
@@ -219,23 +198,23 @@ def test_transient_error_with_side_effect_already_posted_completes(mock_sleep: o
 def test_restart_issue_request_with_stale_signed_comments_does_not_false_complete_on_transient(
     mock_sleep: object, tmp_path: Path
 ) -> None:
-    service, github, _ = make_service(tmp_path)
+    service, github, gajae_runner = make_service(tmp_path)
     stale_signature = "<!-- dani:stage=issue_request;job=stale-job;issue=11 -->"
     github.add_issue_signature("acme/demo", 11, stale_signature)
 
-    original_launch = service.codex_runner.launch
+    original_launch = gajae_runner.launch
 
     def launch_without_new_side_effect(repo_path: Path, job, prompt: str):
         session = original_launch(repo_path, job, prompt)
         github.issue_comment_map[("acme/demo", 11)] = [{"body": stale_signature}]
         return session
 
-    service.codex_runner.launch = launch_without_new_side_effect  # type: ignore[assignment]
+    gajae_runner.launch = launch_without_new_side_effect  # type: ignore[assignment]
 
     def wait_that_always_fails(runtime_handle: str, **kwargs: object) -> None:
         raise TransientCapacityError(_CAPACITY_MSG, _CAPACITY_MSG)
 
-    service.codex_runner.wait = wait_that_always_fails  # type: ignore[assignment]
+    gajae_runner.wait = wait_that_always_fails  # type: ignore[assignment]
 
     service.handle_event(_issue_event())
     service.wait_for_idle()

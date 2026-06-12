@@ -44,16 +44,16 @@ def test_storage_round_trips_runtime_metadata_and_filters_by_effective_runtime(t
         SessionRecord(
             repo_full_name=repo.full_name,
             stage="issue_request",
-            runtime_handle="runtime-omo",
-            prompt_path=str(tmp_path / "prompt-omo.txt"),
-            script_path=str(tmp_path / "run-omo.sh"),
+            runtime_handle="runtime-gajae",
+            prompt_path=str(tmp_path / "prompt-gajae.txt"),
+            script_path=str(tmp_path / "run-gajae.sh"),
             worktree_path=str(tmp_path),
             job_id=job.id,
             issue_number=1,
-            codex_session_id="ses_omo123",
-            preferred_runtime="omo",
-            effective_runtime="omo",
-            native_session_runtime="omo",
+            codex_session_id="gjc-session123",
+            preferred_runtime="gajae",
+            effective_runtime="gajae",
+            native_session_runtime="gajae",
         )
     )
     storage.create_session(
@@ -67,12 +67,12 @@ def test_storage_round_trips_runtime_metadata_and_filters_by_effective_runtime(t
             job_id=job.id,
             issue_number=1,
             codex_session_id="codex-123",
-            preferred_runtime="omo",
+            preferred_runtime="gajae",
             effective_runtime="codex",
             native_session_runtime="codex",
-            fallback_reason="claude_weekly_limit",
-            bridge_source_runtime="omo",
-            bridge_source_session_id="ses_omo123",
+            fallback_reason="manual_reroute",
+            bridge_source_runtime="gajae",
+            bridge_source_session_id="gjc-session123",
         )
     )
 
@@ -84,9 +84,9 @@ def test_storage_round_trips_runtime_metadata_and_filters_by_effective_runtime(t
     )
 
     assert latest_codex is not None
-    assert latest_codex.fallback_reason == "claude_weekly_limit"
-    assert latest_codex.bridge_source_runtime == "omo"
-    assert latest_codex.bridge_source_session_id == "ses_omo123"
+    assert latest_codex.fallback_reason == "manual_reroute"
+    assert latest_codex.bridge_source_runtime == "gajae"
+    assert latest_codex.bridge_source_session_id == "gjc-session123"
 
 
 def test_storage_reads_legacy_codex_session_key(tmp_path: Path) -> None:
